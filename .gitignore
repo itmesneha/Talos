@@ -1,11 +1,36 @@
+# Python
 __pycache__/
-*.pyc
-.DS_Store
-.env
+*.py[cod]
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Credentials and secrets
 credentials.json
 token*.json
-*.log
-users.json
+*.key
+*.pem
+.env
+.env.*
+
+# Data / state files
 state.json
+users.json
 tools_store.json
+event_log.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store

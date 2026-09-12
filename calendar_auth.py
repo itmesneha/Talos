@@ -27,7 +27,7 @@ REDIRECT_URI     = "http://localhost:8080/callback"
 
 # Populated by start_callback_server — called by slack_bot after bot starts
 _on_token_saved = None   # callback(user_id, slack_id)
-_pending: dict[str, str] = {}   # state token → slack_id
+_pending: dict[str, dict] = {}   # state token → {"slack_id": str, "flow": Flow}
 
 
 def token_path(user_id: str) -> str:
@@ -61,7 +61,7 @@ def generate_auth_url(user_id: str, slack_id: str) -> str:
         state=user_id,
         prompt="consent",
     )
-    _pending[user_id] = slack_id
+    _pending[user_id] = {"slack_id": slack_id, "flow": flow}
     return auth_url
 
 
@@ -82,12 +82,12 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            flow = Flow.from_client_secrets_file(
-                CREDENTIALS_FILE,
-                scopes=SCOPES,
-                redirect_uri=REDIRECT_URI,
-                state=user_id,
-            )
+            pending = _pending.pop(user_id, None)
+            if not pending:
+                self._respond(400, "Unknown or expired state")
+                return
+
+            flow = pending["flow"]
             flow.fetch_token(code=code)
             creds = flow.credentials
 
@@ -98,7 +98,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self._respond(200, "All done! You can close this tab and go back to Slack.")
 
             # Notify the bot so it can DM the user
-            slack_id = _pending.pop(user_id, None)
+            slack_id = pending["slack_id"]
             if _on_token_saved and slack_id:
                 threading.Thread(
                     target=_on_token_saved,
