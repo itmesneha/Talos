@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 credentials.json
 token*.json
+*.log
+users.json
+state.json
+tools_store.json
