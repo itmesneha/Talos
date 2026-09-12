@@ -38,6 +38,7 @@
     "scopes": {
       "bot": [
         "channels:history",
+        "channels:read",
         "chat:write",
         "commands",
         "im:write",

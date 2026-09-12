@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from datetime import datetime, timedelta, timezone
 from slack_sdk import WebClient
@@ -250,20 +251,82 @@ def slack_create_channel(name: str) -> str:
         return f"Slack channel creation error: {e}"
 
 
+_SLACK_ID_RE = re.compile(r"^[UW][A-Z0-9]{8,}$")
+
+
+def slack_lookup_user_id(name: str) -> str | None:
+    """
+    Resolves a display name (e.g. "Priya") to a Slack user ID by searching
+    the workspace member list. Detection only ever sees names typed in
+    message text, never IDs, so anything that invites people by name needs
+    this to turn them into something the Slack API accepts.
+    """
+    try:
+        resp = _slack_client.users_list()
+        if not resp["ok"]:
+            return None
+        name_lower = (name or "").strip().lower()
+        if not name_lower:
+            return None
+        for member in resp.get("members", []):
+            profile = member.get("profile", {})
+            candidates = {
+                member.get("name", ""),
+                member.get("real_name", ""),
+                profile.get("real_name", ""),
+                profile.get("display_name", ""),
+            }
+            if any(c.lower() == name_lower for c in candidates if c):
+                return member["id"]
+    except Exception:
+        pass
+    return None
+
+
 def slack_invite(channel_id: str, user_ids: list) -> str:
-    """Invites a list of Slack user IDs to a channel."""
+    """
+    Invites people to a channel. Each entry in user_ids may be a real Slack
+    user ID OR a display name — names get resolved via slack_lookup_user_id
+    first, since detection only ever captures names, not IDs.
+    """
+    resolved, unresolved = [], []
+    for entry in user_ids or []:
+        if _SLACK_ID_RE.match(entry or ""):
+            resolved.append(entry)
+            continue
+        uid = slack_lookup_user_id(entry)
+        (resolved if uid else unresolved).append(uid or entry)
+
+    if not resolved:
+        return f"Slack invite error: could not resolve any of {user_ids} to a workspace member"
+
     try:
         resp = _slack_client.conversations_invite(
-            channel=channel_id, users=",".join(user_ids)
+            channel=channel_id, users=",".join(resolved)
         )
         if resp["ok"]:
-            return f"Invited {len(user_ids)} users to channel"
+            note = f" (couldn't find: {', '.join(unresolved)})" if unresolved else ""
+            return f"Invited {len(resolved)} users to channel{note}"
         return f"Slack invite error: {resp.get('error')}"
     except Exception as e:
         return f"Slack invite error: {e}"
 
 
 # ── Tool map ──────────────────────────────────────────────────────────────────
+
+def _first_present(args: dict, *keys, default=None):
+    """
+    Returns the first non-empty value found under any of `keys` in args.
+    detect.py's LLM freely names args/fixed_args (e.g. "invitees" instead of
+    "user_ids", "project_name" instead of "name") — this lets the tool map
+    accept whatever name it picked instead of requiring an exact match.
+    """
+    for k in keys:
+        v = args.get(k)
+        if v:
+            return v
+    return default
+
 
 def get_tool_map(user_id: str) -> dict:
     """
@@ -309,7 +372,7 @@ def get_tool_map(user_id: str) -> dict:
             query=args.get("query") or args.get("person", ""),
         ),
         "notion_write": lambda args: notion_write(
-            title=args.get("title") or args.get("topic") or args.get("person", "Note"),
+            title=_first_present(args, "title", "topic", "project_name", "person", default="Note"),
             notes=args.get("notes"),
         ),
         "slack_read": lambda args: slack_read(
@@ -321,11 +384,11 @@ def get_tool_map(user_id: str) -> dict:
             channel=args.get("channel"),
         ),
         "slack_create_channel": lambda args: slack_create_channel(
-            name=args.get("name") or args.get("project_name", "new-project"),
+            name=_first_present(args, "name", "project_name", default="new-project"),
         ),
         "slack_invite": lambda args: slack_invite(
             channel_id=args.get("channel_id", ""),
-            user_ids=args.get("user_ids", []),
+            user_ids=_first_present(args, "user_ids", "invitees", "people", "team", "members", default=[]),
         ),
     }
 
@@ -363,11 +426,46 @@ TOOL_MAP = {
     ),
     "notion_read":          lambda args: notion_read(query=args.get("query") or args.get("person", "")),
     "notion_write":         lambda args: notion_write(
-        title=args.get("title") or args.get("topic") or args.get("person", "Note"),
+        title=_first_present(args, "title", "topic", "project_name", "person", default="Note"),
         notes=args.get("notes"),
     ),
     "slack_read":           lambda args: slack_read(channel=args.get("channel"), limit=int(args.get("limit", 5))),
     "slack_write":          lambda args: slack_write(text=args.get("text", ""), channel=args.get("channel")),
-    "slack_create_channel": lambda args: slack_create_channel(name=args.get("name") or args.get("project_name", "new-project")),
-    "slack_invite":         lambda args: slack_invite(channel_id=args.get("channel_id", ""), user_ids=args.get("user_ids", [])),
+    "slack_create_channel": lambda args: slack_create_channel(name=_first_present(args, "name", "project_name", default="new-project")),
+    "slack_invite":         lambda args: slack_invite(channel_id=args.get("channel_id", ""), user_ids=_first_present(args, "user_ids", "invitees", "people", "team", "members", default=[])),
 }
+
+
+# ── Action-tag bridge ───────────────────────────────────────────────────────────
+# detect.py/poller.py tag events with specific actions ("slack.channel_created",
+# "notion.template_added", ...); this tool map is keyed by verb_noun primitive
+# names ("slack_create_channel", "notion_write", ...). The two vocabularies
+# evolved independently — this is the one place that translates between them.
+
+_ACTION_TO_TOOL = {
+    "notion.page_created":    "notion_write",
+    "notion.page_updated":    "notion_write",
+    "notion.template_added":  "notion_write",
+    "slack.channel_created":  "slack_create_channel",
+    "slack.member_invited":   "slack_invite",
+    "slack.message_posted":   "slack_write",
+    "slack.topic_changed":    "slack_write",
+    "slack.purpose_changed":  "slack_write",
+    "calendar.event_created": "calendar_write",
+    "calendar.event_updated": "calendar_write",
+}
+
+
+def resolve_executor(executor_map: dict, step: str):
+    """
+    Maps a detected sequence step to the right entry in executor_map/TOOL_MAP:
+    exact key match first, then the action-tag translation above, then a bare
+    source-name fallback ("slack.channel_created" -> "slack") for anything
+    unmapped. Returns None if nothing matches.
+    """
+    if step in executor_map:
+        return executor_map[step]
+    mapped = _ACTION_TO_TOOL.get(step)
+    if mapped and mapped in executor_map:
+        return executor_map[mapped]
+    return executor_map.get(step.split(".")[0])

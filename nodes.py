@@ -6,26 +6,26 @@ Each node receives the current AgentState and returns a dict of updated keys.
 Nodes:
     poll_node     — polls Calendar / Notion / Slack for new events
     cluster_node  — groups events into time-based clusters (pure, no LLM)
-    llm_node      — calls Ollama per cluster to label routines
+    llm_node      — calls the LLM per cluster to label routines
     pattern_node  — finds sequences repeated 2+ times (pure, no LLM)
-    propose_node  — generates tool definition via Ollama, DMs the user
+    propose_node  — generates tool definition via the LLM, DMs the user
     human_node    — LangGraph interrupt: pauses until Slack reply arrives
     confirm_node  — saves (with optional inline edits) or discards the tool
-    executor_node — calls Ollama to write a custom execute() function for the
+    executor_node — calls the LLM to write a custom execute() function for the
                     confirmed tool; saves executor_code to tools_store.json
 """
 
 import json
 import re
-from collections import Counter
 from typing import TypedDict, Optional
 
-import ollama
+import llm
 from langgraph.types import interrupt
 from detect import _extract_json
 
 from poller import poll_user as _do_poll
 from detect import cluster_by_time, interpret_cluster
+from matching import group_similar_sequences
 from storage import get_events, get_users, append_tool, tool_already_saved, read_json, write_json
 
 
@@ -109,7 +109,7 @@ def cluster_node(state: AgentState) -> dict:
 
 def llm_node(state: AgentState) -> dict:
     """
-    Calls Ollama (llama3.1:8b) on each cluster to decide if it is a routine
+    Calls the LLM on each cluster to decide if it is a routine
     and, if so, extracts the sequence, args, and description.
     """
     clusters = state.get("clusters") or []
@@ -129,18 +129,20 @@ def llm_node(state: AgentState) -> dict:
 def pattern_node(state: AgentState) -> dict:
     """
     Pure matching — no API calls.
-    Finds sequences that appear in 2+ clusters and aren't already saved as tools.
+    Finds sequences that appear in 2+ clusters (fuzzy set-overlap, not exact
+    equality — a routine missing one step on one occasion still counts) and
+    aren't already saved as tools.
     """
     user_id = state["user_id"]
     interpreted = state.get("interpreted_clusters") or []
 
-    counts = Counter(tuple(r["sequence"]) for r in interpreted)
-    for seq_tuple, count in counts.items():
-        if count >= 2 and not tool_already_saved(user_id, list(seq_tuple)):
-            for r in reversed(interpreted):
-                if tuple(r["sequence"]) == seq_tuple:
-                    print(f"[node:pattern] found repeating pattern: {list(seq_tuple)}")
-                    return {"pattern": dict(r)}
+    for group in group_similar_sequences(interpreted):
+        if len(group) < 2:
+            continue
+        candidate = group[-1]  # most recent matching interpretation
+        if not tool_already_saved(user_id, candidate["sequence"]):
+            print(f"[node:pattern] found repeating pattern: {candidate['sequence']}")
+            return {"pattern": dict(candidate)}
 
     print("[node:pattern] no new repeating pattern")
     return {"pattern": None}
@@ -165,7 +167,13 @@ def _build_proposal_blocks(pattern: dict, header: str) -> list[dict]:
             f"`{' → '.join(pattern['sequence'])}`\n\n"
         )
 
-    return [
+    fixed_args = pattern.get("fixed_args") or []
+    fixed_str = "\n".join(
+        f"• `{f['name']}` — {f.get('value', '')}"
+        for f in fixed_args
+    )
+
+    blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
         {"type": "section", "text": {"type": "mrkdwn", "text": (
             f"{sequence_line}"
@@ -173,6 +181,10 @@ def _build_proposal_blocks(pattern: dict, header: str) -> list[dict]:
         )}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*What it does:*\n{steps_str}"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Arguments you provide each run:*\n{args_str}"}},
+    ]
+    if fixed_args:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Stays the same every time:*\n{fixed_str}"}})
+    blocks += [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Example usage:*\n`{pattern.get('example', '')}`"}},
         {
             "type": "actions",
@@ -184,6 +196,7 @@ def _build_proposal_blocks(pattern: dict, header: str) -> list[dict]:
         },
         {"type": "context", "elements": [{"type": "mrkdwn", "text": "You can also just reply here with a change request in plain English."}]},
     ]
+    return blocks
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,7 +205,7 @@ def _build_proposal_blocks(pattern: dict, header: str) -> list[dict]:
 
 def propose_node(state: AgentState) -> dict:
     """
-    Calls Ollama to produce a rich tool definition (name, description, steps,
+    Calls the LLM to produce a rich tool definition (name, description, steps,
     what_you_provide, example), then DMs the Slack user with a full explanation
     and a yes / no prompt.
     """
@@ -223,9 +236,8 @@ Reply with ONLY valid JSON:
 }}"""
 
     try:
-        print("[node:propose] calling Ollama for tool definition ...")
-        resp = ollama.chat(model="llama3.1:8b", messages=[{"role": "user", "content": prompt}])
-        raw = resp["message"]["content"].strip()
+        print("[node:propose] calling LLM for tool definition ...")
+        raw = llm.chat(prompt).strip()
         definition = _extract_json(raw)
         print(f"[node:propose] definition: {definition.get('tool_name')}")
     except Exception as e:
@@ -308,7 +320,7 @@ def confirm_node(state: AgentState) -> dict:
 
 def _apply_change_request(pattern: dict, change_request: str) -> dict:
     """
-    Calls Ollama to apply a natural-language change request to the tool definition.
+    Calls the LLM to apply a natural-language change request to the tool definition.
     Returns an updated copy of pattern.
     """
     prompt = f"""You are updating a workflow tool definition based on user feedback.
@@ -327,9 +339,8 @@ For "args", return the full updated list.
 Omit fields that should stay the same."""
 
     try:
-        print(f"[node:re_propose] applying change via Ollama: '{change_request[:80]}'")
-        resp = ollama.chat(model="llama3.1:8b", messages=[{"role": "user", "content": prompt}])
-        raw = resp["message"]["content"].strip()
+        print(f"[node:re_propose] applying change via LLM: '{change_request[:80]}'")
+        raw = llm.chat(prompt).strip()
         updates = _extract_json(raw)
         updated = dict(pattern)
         for key in ("tool_name", "description", "args", "steps"):
@@ -337,13 +348,13 @@ Omit fields that should stay the same."""
                 updated[key] = updates[key]
         return updated
     except Exception as e:
-        print(f"[node:re_propose] Ollama change failed: {e} — pattern unchanged")
+        print(f"[node:re_propose] LLM change failed: {e} — pattern unchanged")
         return dict(pattern)
 
 
 def re_propose_node(state: AgentState) -> dict:
     """
-    Applies the user's change request to the tool definition via Ollama,
+    Applies the user's change request to the tool definition via the LLM,
     then re-sends the proposal DM with the same yes / no / describe-change options.
     Loops back through human_node → confirm_node until the user says yes or no.
     """
@@ -410,12 +421,19 @@ Available tools (already in scope — do NOT import anything):
         Posts a message to a Slack channel.
 
     slack_create_channel(name) -> str
-        Creates a new public Slack channel. Returns "Created #<name> (ID: <channel_id>)" on success.
+        Creates a new public Slack channel. Returns "Created #<name> (ID: <channel_id>)"
+        on success — parse the channel_id out of that string (regex, or split on
+        "(ID: " and ")") before calling slack_invite.
 
     slack_invite(channel_id, user_ids) -> str
-        Invites a list of Slack user IDs (Python list of strings) to a channel.
+        Invites people to a channel. user_ids is a Python list of strings — each
+        entry may be a real Slack ID OR a plain display name (e.g. "Priya");
+        names are resolved automatically, so pass whatever names/IDs you have.
 
 The function receives args as a dict — access values with args["key"] or args.get("key").
+Some values are constants baked into the tool rather than typed by the user each
+run (e.g. the same list of people invited every time) — these arrive in args
+exactly like any other value, just listed separately below under "Constants".
 """
 
 
@@ -423,7 +441,7 @@ def executor_node(state: AgentState) -> dict:
     """
     Runs only when a tool was confirmed (pattern["confirmed"] == True).
 
-    Calls Ollama to generate a custom Python function:
+    Calls the LLM to generate a custom Python function:
         def execute(args: dict) -> str: ...
 
     The function body uses the available executor helpers and is
@@ -443,10 +461,15 @@ def executor_node(state: AgentState) -> dict:
     user_id = state["user_id"]
     tool_name = pattern.get("tool_name", "unknown")
     tool_args = pattern.get("args") or []
+    fixed_args = pattern.get("fixed_args") or []
 
     args_str = "\n".join(
         f"  args[\"{a['name']}\"]  — {a.get('description', '')}  (e.g. \"{a.get('example', '?')}\")"
         for a in tool_args
+    ) or "  (none)"
+    fixed_str = "\n".join(
+        f"  args[\"{f['name']}\"]  — constant, always this value: {f.get('value', '')!r}"
+        for f in fixed_args
     ) or "  (none)"
     steps_str = "\n".join(
         f"  {i+1}. {s}" for i, s in enumerate(pattern.get("steps", []))
@@ -455,8 +478,10 @@ def executor_node(state: AgentState) -> dict:
 
 Tool name: {tool_name}
 Description: {pattern.get('description', '')}
-Arguments available in args dict:
+Arguments available in args dict (vary each run — the user provides these):
 {args_str}
+Constants available in args dict (same every run — already filled in, just use them):
+{fixed_str}
 Steps to perform:
 {steps_str}
 
@@ -472,18 +497,19 @@ def execute(args: dict) -> str:
 
 Rules:
 - Access argument values via args["name"], e.g. args["person"], args["topic"], args["time"], args["email"].
+- Constants (listed above) are already present in args under their own name — read them the same way, don't ask for them again.
 - For a calendar invite: calendar_write(person=args["person"], topic=args.get("topic"), start_datetime=args.get("start_datetime"), end_datetime=args.get("end_datetime"), email=args.get("email"))
-- For a Notion page: write_notion_page(title=args.get("topic") or args.get("person", "Note"), notes=args.get("notes"))
-- For a Slack message: send_slack_message(text=<message text>)
+- For a Notion page: notion_write(title=args.get("topic") or args.get("person", "Note"), notes=args.get("notes"))
+- For a Slack message: slack_write(text=<message text>)
+- For creating a channel and inviting people: call slack_create_channel(name=...) first, parse the channel_id out of its return string, then call slack_invite(channel_id=..., user_ids=<the constant list of people>).
 - Call tools in the order matching the steps.
 - Return a concise one-line summary string.
 - Do not use any other imports or globals.
 """
 
     try:
-        print(f"[node:executor] calling Ollama to generate executor for '{tool_name}' ...")
-        resp = ollama.chat(model="llama3.1:8b", messages=[{"role": "user", "content": prompt}])
-        code = resp["message"]["content"].strip()
+        print(f"[node:executor] calling LLM to generate executor for '{tool_name}' ...")
+        code = llm.chat(prompt).strip()
 
         # Strip any markdown code fences (``` or ```python)
         code = re.sub(r"^```(?:python)?", "", code, flags=re.MULTILINE).strip()
@@ -542,8 +568,15 @@ def execute_node(state: AgentState) -> dict:
         calendar_read, calendar_write,
         notion_read, notion_write,
         slack_read, slack_write, slack_create_channel, slack_invite,
-        get_tool_map,
+        get_tool_map, resolve_executor,
     )
+
+    # Bake in constants stored on the tool (e.g. the same 4-5 invitees every
+    # run) — these were captured at detection time specifically so the user
+    # doesn't have to retype them each invocation. User-supplied args win on
+    # a name collision.
+    fixed_args = {f["name"]: f["value"] for f in (tool.get("fixed_args") or []) if "name" in f}
+    args = {**fixed_args, **args}
 
     executor_map = get_tool_map(user_id)
 
@@ -609,7 +642,7 @@ def execute_node(state: AgentState) -> dict:
 
     for step in steps:
         client.chat_update(channel=channel, ts=msg_ts, text=render(results, running=step))
-        executor = executor_map.get(step)
+        executor = resolve_executor(executor_map, step)
         try:
             result = executor(args) if executor else f"no executor for {step}"
         except Exception as e:

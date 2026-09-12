@@ -16,7 +16,7 @@ def _run_user_safe(user_id: str) -> None:
 def agent_loop(interval_seconds: int = 15) -> None:
     """
     Each cycle spawns one thread per user so users run fully in parallel.
-    A pending proposal (or slow Ollama call) for one user never blocks others.
+    A pending proposal (or slow LLM call) for one user never blocks others.
     Waits for all per-user threads to finish before sleeping until the next cycle.
     """
     while True:
