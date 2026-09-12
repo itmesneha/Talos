@@ -73,45 +73,46 @@ def send_calendar_invite(
     person: str,
     user_id: str = None,
     topic: str = None,
-    time_str: str = None,
-    duration_minutes: int = 30,
+    start_datetime: str = None,
+    end_datetime: str = None,
     email: str = None,
 ) -> str:
     """
     Sends a Google Calendar invite via the Calendar API.
 
-    person           — display name of who the meeting is with
-    email            — attendee email address (invite is sent to this address)
-    topic            — meeting title (defaults to "Meeting with <person>")
-    time_str         — natural-language time, e.g. "tomorrow 2pm", "Friday 10am"
-                       Defaults to tomorrow at 10 AM UTC if omitted or unparsable.
-    duration_minutes — length of the event (default 30)
+    person         — display name of who the meeting is with
+    email          — attendee email address (invite is sent to this address)
+    topic          — meeting title (defaults to "Meeting with <person>")
+    start_datetime — ISO 8601 string, e.g. "2026-09-15T10:00:00Z"
+                     Defaults to tomorrow at 10 AM UTC if omitted.
+    end_datetime   — ISO 8601 string, e.g. "2026-09-15T11:00:00Z"
+                     Defaults to 30 minutes after start if omitted.
     """
     from poller import _get_calendar_service
     service = _get_calendar_service(user_id) if user_id else None
     if not service:
         return "Calendar not connected — skipping invite"
 
-    # Parse time_str; fall back to tomorrow 10 AM UTC
-    start = None
-    if time_str:
-        try:
-            import dateparser
-            parsed = dateparser.parse(
-                time_str,
-                settings={"PREFER_DATES_FROM": "future", "RETURN_AS_TIMEZONE_AWARE": True},
-            )
-            if parsed:
-                start = parsed.astimezone(timezone.utc)
-        except Exception:
-            pass
+    # Parse start; fall back to tomorrow 10 AM UTC
+    try:
+        start = datetime.fromisoformat(start_datetime.replace("Z", "+00:00")) if start_datetime else None
+    except (ValueError, AttributeError):
+        start = None
 
     if start is None:
         start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
             hour=10, minute=0, second=0, microsecond=0
         )
 
-    end   = start + timedelta(minutes=duration_minutes)
+    # Parse end; fall back to start + 30 min
+    try:
+        end = datetime.fromisoformat(end_datetime.replace("Z", "+00:00")) if end_datetime else None
+    except (ValueError, AttributeError):
+        end = None
+
+    if end is None:
+        end = start + timedelta(minutes=30)
+
     title = topic or f"Meeting with {person}"
 
     body: dict = {
@@ -183,6 +184,85 @@ def send_slack_message(text: str, channel: str = None) -> str:
     return f"Slack error: {resp.get('error')}"
 
 
+# ── Granular primitives ───────────────────────────────────────────────────────
+
+def calendar_read(person: str, user_id: str = None) -> str:
+    """Returns the next upcoming calendar event for a person."""
+    return check_calendar(person, user_id=user_id)
+
+
+def calendar_write(
+    person: str,
+    user_id: str = None,
+    topic: str = None,
+    start_datetime: str = None,
+    end_datetime: str = None,
+    email: str = None,
+) -> str:
+    """Creates a Google Calendar event and sends an invite."""
+    return send_calendar_invite(person, user_id, topic, start_datetime, end_datetime, email)
+
+
+def notion_read(query: str) -> str:
+    """Returns open Notion tasks mentioning the given person or keyword."""
+    return check_notion(query)
+
+
+def notion_write(title: str, notes: str = None) -> str:
+    """Creates a new Notion page with an optional body."""
+    return write_notion_page(title, notes)
+
+
+def slack_read(channel: str = None, limit: int = 5) -> str:
+    """Returns recent messages from a Slack channel."""
+    target = channel or SLACK_CHANNEL
+    try:
+        resp = _slack_client.conversations_history(channel=target, limit=limit)
+        if not resp["ok"]:
+            return f"Slack error: {resp.get('error')}"
+        messages = resp.get("messages", [])
+        if not messages:
+            return "No recent messages"
+        lines = [f"- {m.get('text', '(no text)')}" for m in messages]
+        return "Recent messages:\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Slack read error: {e}"
+
+
+def slack_write(text: str, channel: str = None) -> str:
+    """Posts a message to a Slack channel."""
+    return send_slack_message(text, channel)
+
+
+def slack_create_channel(name: str) -> str:
+    """
+    Creates a new public Slack channel.
+    Returns a string containing the channel ID (e.g. "Created #name (ID: C123)").
+    """
+    clean = name.lower().replace(" ", "-")
+    try:
+        resp = _slack_client.conversations_create(name=clean)
+        if resp["ok"]:
+            channel_id = resp["channel"]["id"]
+            return f"Created #{clean} (ID: {channel_id})"
+        return f"Slack error: {resp.get('error')}"
+    except Exception as e:
+        return f"Slack channel creation error: {e}"
+
+
+def slack_invite(channel_id: str, user_ids: list) -> str:
+    """Invites a list of Slack user IDs to a channel."""
+    try:
+        resp = _slack_client.conversations_invite(
+            channel=channel_id, users=",".join(user_ids)
+        )
+        if resp["ok"]:
+            return f"Invited {len(user_ids)} users to channel"
+        return f"Slack invite error: {resp.get('error')}"
+    except Exception as e:
+        return f"Slack invite error: {e}"
+
+
 # ── Tool map ──────────────────────────────────────────────────────────────────
 
 def get_tool_map(user_id: str) -> dict:
@@ -191,11 +271,13 @@ def get_tool_map(user_id: str) -> dict:
     Keys match the sequence identifiers produced by the LLM in detect.py.
     """
     return {
+        # Legacy keys (kept for backward compat with stored executor_code)
         "calendar": lambda args: send_calendar_invite(
             person=args.get("person", ""),
             user_id=user_id,
             topic=args.get("topic"),
-            time_str=args.get("time"),
+            start_datetime=args.get("start_datetime"),
+            end_datetime=args.get("end_datetime"),
             email=args.get("email"),
         ),
         "notion": lambda args: write_notion_page(
@@ -210,15 +292,52 @@ def get_tool_map(user_id: str) -> dict:
                 + check_notion(args.get("person", ""))
             )
         ),
+        # Granular primitives
+        "calendar_read": lambda args: calendar_read(
+            person=args.get("person", ""),
+            user_id=user_id,
+        ),
+        "calendar_write": lambda args: calendar_write(
+            person=args.get("person", ""),
+            user_id=user_id,
+            topic=args.get("topic"),
+            start_datetime=args.get("start_datetime"),
+            end_datetime=args.get("end_datetime"),
+            email=args.get("email"),
+        ),
+        "notion_read": lambda args: notion_read(
+            query=args.get("query") or args.get("person", ""),
+        ),
+        "notion_write": lambda args: notion_write(
+            title=args.get("title") or args.get("topic") or args.get("person", "Note"),
+            notes=args.get("notes"),
+        ),
+        "slack_read": lambda args: slack_read(
+            channel=args.get("channel"),
+            limit=int(args.get("limit", 5)),
+        ),
+        "slack_write": lambda args: slack_write(
+            text=args.get("text", ""),
+            channel=args.get("channel"),
+        ),
+        "slack_create_channel": lambda args: slack_create_channel(
+            name=args.get("name") or args.get("project_name", "new-project"),
+        ),
+        "slack_invite": lambda args: slack_invite(
+            channel_id=args.get("channel_id", ""),
+            user_ids=args.get("user_ids", []),
+        ),
     }
 
 
 # Fallback map — used when user_id is unavailable (e.g. tests)
 TOOL_MAP = {
+    # Legacy keys
     "calendar": lambda args: send_calendar_invite(
         person=args.get("person", ""),
         topic=args.get("topic"),
-        time_str=args.get("time"),
+        start_datetime=args.get("start_datetime"),
+        end_datetime=args.get("end_datetime"),
         email=args.get("email"),
     ),
     "notion": lambda args: write_notion_page(
@@ -233,4 +352,22 @@ TOOL_MAP = {
             + check_notion(args.get("person", ""))
         )
     ),
+    # Granular primitives
+    "calendar_read":        lambda args: calendar_read(person=args.get("person", "")),
+    "calendar_write":       lambda args: calendar_write(
+        person=args.get("person", ""),
+        topic=args.get("topic"),
+        start_datetime=args.get("start_datetime"),
+        end_datetime=args.get("end_datetime"),
+        email=args.get("email"),
+    ),
+    "notion_read":          lambda args: notion_read(query=args.get("query") or args.get("person", "")),
+    "notion_write":         lambda args: notion_write(
+        title=args.get("title") or args.get("topic") or args.get("person", "Note"),
+        notes=args.get("notes"),
+    ),
+    "slack_read":           lambda args: slack_read(channel=args.get("channel"), limit=int(args.get("limit", 5))),
+    "slack_write":          lambda args: slack_write(text=args.get("text", ""), channel=args.get("channel")),
+    "slack_create_channel": lambda args: slack_create_channel(name=args.get("name") or args.get("project_name", "new-project")),
+    "slack_invite":         lambda args: slack_invite(channel_id=args.get("channel_id", ""), user_ids=args.get("user_ids", [])),
 }

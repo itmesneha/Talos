@@ -378,31 +378,38 @@ def re_propose_node(state: AgentState) -> dict:
 _TOOL_DOCS = """
 Available tools (already in scope — do NOT import anything):
 
-    send_calendar_invite(person, topic=None, time_str=None, duration_minutes=30, email=None) -> str
-        Calls the Google Calendar API to create an event and send an invite.
-        person    — display name of attendee (required)
-        topic     — meeting title (default: "Meeting with <person>")
-        time_str  — e.g. "tomorrow 2pm", "Friday 10am" (default: tomorrow 10 AM)
-        email     — attendee email address so Google actually sends the invite
-        Returns a confirmation string with the event link.
+  READ:
+    calendar_read(person, user_id=None) -> str
+        Returns the next upcoming Google Calendar event for a person.
 
-    write_notion_page(title, notes=None) -> str
-        Writes a new page in the Notion database.
-        title  — page title (required)
-        notes  — optional body text
-        Returns "Notion page written: '<title>'" or an error string.
+    notion_read(query) -> str
+        Returns open Notion tasks mentioning the given person or keyword.
 
-    send_slack_message(text) -> str
-        Sends a Slack message to the default channel.
-        Returns "Slack message sent" or an error string.
+    slack_read(channel=None, limit=5) -> str
+        Returns recent messages from a Slack channel.
 
-    check_calendar(person) -> str
-        Read-only: returns the next upcoming calendar event for this person.
+  WRITE:
+    calendar_write(person, user_id=None, topic=None, start_datetime=None, end_datetime=None, email=None) -> str
+        Creates a Google Calendar event and sends an invite.
+        person         — display name of attendee (required)
+        topic          — meeting title
+        start_datetime — ISO 8601 string, e.g. "2026-09-15T10:00:00Z"
+        end_datetime   — ISO 8601 string, e.g. "2026-09-15T11:00:00Z"
+        email          — attendee email address
 
-    check_notion(person) -> str
-        Read-only: returns open Notion tasks mentioning this person.
+    notion_write(title, notes=None) -> str
+        Creates a new Notion page. notes is optional body text.
 
-The function receives args as a dict — access values with args["key"].
+    slack_write(text, channel=None) -> str
+        Posts a message to a Slack channel.
+
+    slack_create_channel(name) -> str
+        Creates a new public Slack channel. Returns "Created #<name> (ID: <channel_id>)" on success.
+
+    slack_invite(channel_id, user_ids) -> str
+        Invites a list of Slack user IDs (Python list of strings) to a channel.
+
+The function receives args as a dict — access values with args["key"] or args.get("key").
 """
 
 
@@ -459,7 +466,7 @@ def execute(args: dict) -> str:
 
 Rules:
 - Access argument values via args["name"], e.g. args["person"], args["topic"], args["time"], args["email"].
-- For a calendar invite: send_calendar_invite(person=args["person"], topic=args.get("topic"), time_str=args.get("time"), email=args.get("email"))
+- For a calendar invite: calendar_write(person=args["person"], topic=args.get("topic"), start_datetime=args.get("start_datetime"), end_datetime=args.get("end_datetime"), email=args.get("email"))
 - For a Notion page: write_notion_page(title=args.get("topic") or args.get("person", "Note"), notes=args.get("notes"))
 - For a Slack message: send_slack_message(text=<message text>)
 - Call tools in the order matching the steps.
@@ -526,6 +533,9 @@ def execute_node(state: AgentState) -> dict:
     from tools import (
         check_calendar, check_notion,
         send_calendar_invite, write_notion_page, send_slack_message,
+        calendar_read, calendar_write,
+        notion_read, notion_write,
+        slack_read, slack_write, slack_create_channel, slack_invite,
         get_tool_map,
     )
 
@@ -543,6 +553,16 @@ def execute_node(state: AgentState) -> dict:
         msg_ts = resp["ts"]
         try:
             sandbox = {
+                # Granular primitives
+                "calendar_read":        lambda person: calendar_read(person, user_id=user_id),
+                "calendar_write":       lambda **kw: calendar_write(user_id=user_id, **kw),
+                "notion_read":          notion_read,
+                "notion_write":         notion_write,
+                "slack_read":           slack_read,
+                "slack_write":          slack_write,
+                "slack_create_channel": slack_create_channel,
+                "slack_invite":         slack_invite,
+                # Legacy names kept so old executor_code still works
                 "check_calendar":       lambda person: check_calendar(person, user_id=user_id),
                 "check_notion":         check_notion,
                 "send_calendar_invite": lambda **kw: send_calendar_invite(user_id=user_id, **kw),

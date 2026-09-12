@@ -21,7 +21,7 @@ from google_auth_oauthlib.flow import Flow
 from dotenv import load_dotenv
 load_dotenv()
 
-SCOPES           = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES           = ["https://www.googleapis.com/auth/calendar"]
 CREDENTIALS_FILE = "credentials.json"
 REDIRECT_URI     = "http://localhost:8080/callback"
 
@@ -57,7 +57,6 @@ def generate_auth_url(user_id: str, slack_id: str) -> str:
     # Use user_id as the state param so the callback knows who this is
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         state=user_id,
         prompt="consent",
     )
