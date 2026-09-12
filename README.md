@@ -35,13 +35,13 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 |---|---|
 | `poll` | Fetches new events from Google Calendar, Notion, and Slack |
 | `cluster` | Groups events that happen within a 10-minute window |
-| `llm` | Calls Ollama (`llama3.1:8b`) on each cluster to decide if it's a routine |
-| `pattern` | Finds sequences that repeat 2+ times and aren't already saved |
-| `propose` | Generates a full tool definition via Ollama (with named `args`), DMs the user |
+| `llm` | Calls the LLM (OpenRouter, `openai/gpt-4o-mini` by default) on each cluster to decide if it's a routine |
+| `pattern` | Fuzzy-matches sequences that repeat 2+ times (tolerates a missing step) and aren't already saved |
+| `propose` | Generates a full tool definition via the LLM (with named `args` and `fixed_args`), DMs the user |
 | `human` | LangGraph interrupt — pauses the graph until the user replies |
 | `confirm` | Routes to `executor` (yes), `re_propose` (change request), or `END` (no) |
-| `re_propose` | Applies a natural-language change request via Ollama and re-sends the proposal |
-| `executor` | Calls Ollama to generate a custom `execute(args: dict)` function for the tool |
+| `re_propose` | Applies a natural-language change request via the LLM and re-sends the proposal |
+| `executor` | Calls the LLM to generate a custom `execute(args: dict)` function for the tool |
 | `execute` | Runs a saved tool and posts a live-updating Slack checklist |
 
 ### Background Threads
@@ -57,7 +57,7 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 ## Prerequisites
 
 - Python 3.11+
-- [Ollama](https://ollama.com) running locally with `llama3.1:8b` pulled — required for pattern **detection** (`llm_node`). The proposal, re-proposal, and executor-generation steps degrade gracefully to simpler fallbacks without it, but no new patterns will ever be detected if Ollama isn't running.
+- An [OpenRouter](https://openrouter.ai) API key — used for pattern detection, proposal generation, and executor code generation (see `llm.py`). Detection (`llm_node`) fails gracefully and simply finds no patterns if the key is missing or a request fails; it doesn't crash the agent loop.
 - A Slack workspace where you can create apps
 - A Notion integration (optional)
 - A Google Calendar OAuth credential (optional)
@@ -76,11 +76,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Pull the local LLM
+### 2. Get an OpenRouter API key
 
-```bash
-ollama pull llama3.1:8b
-```
+Sign up at [openrouter.ai](https://openrouter.ai) and create an API key — you'll add it to `.env` in step 4.
 
 ### 3. Create a Slack App
 
@@ -99,8 +97,14 @@ Alternatively, create **From scratch** and configure manually:
 
 **Add Bot Token Scopes** (under **OAuth & Permissions → Scopes → Bot Token Scopes**):
 - `channels:history`
+- `channels:manage`
+- `channels:read`
+- `channels:write.invites`
 - `chat:write`
 - `commands`
+- `groups:history`
+- `groups:read`
+- `groups:write`
 - `im:history`
 - `im:read`
 - `im:write`
@@ -133,6 +137,10 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
 SLACK_CHANNEL=C0...
+
+# OpenRouter (LLM calls in detect.py / nodes.py)
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=openai/gpt-4o-mini
 
 # Notion (optional)
 NOTION_TOKEN=secret_...
@@ -167,7 +175,7 @@ Send these as a message to Talos (DM or any channel it's been invited to):
 | Command | What it does |
 |---|---|
 | `!poll now` | Immediately poll and run detection, then DM you if a pattern is found |
-| `!fake proposal` | Skip detection entirely and send yourself a demo proposal DM — useful for previewing the Save/Change/Discard buttons without needing real repeated activity or Ollama |
+| `!fake proposal` | Skip detection entirely and send yourself a demo proposal DM — useful for previewing the Save/Change/Discard buttons without needing real repeated activity or a working OpenRouter key |
 
 ### Seeding mock events (for demos)
 
@@ -204,7 +212,7 @@ If you haven't connected Google Calendar yet, Home shows a **Connect Google Cale
 Talos DMs you a proposal card with the sequence, proposed tool name/description, steps, arguments, and example usage, followed by three buttons:
 
 - **✅ Save** — saves the tool immediately
-- **✏️ Change** — opens a modal to describe what you'd like different (e.g. _call it prep_meeting_ or _add a topic argument_); Talos applies it via Ollama and re-sends an updated proposal with fresh buttons. This loops until you Save or Discard.
+- **✏️ Change** — opens a modal to describe what you'd like different (e.g. _call it prep_meeting_ or _add a topic argument_); Talos applies it via the LLM and re-sends an updated proposal with fresh buttons. This loops until you Save or Discard.
 - **❌ Discard** — drops the proposal
 
 You can also just reply in the thread with a change request in plain English instead of clicking Change — both work.
@@ -233,16 +241,22 @@ The bot posts a live Slack checklist that ticks off each step as it completes.
 
 ## Executor Sandbox
 
-When a tool is confirmed, `executor_node` calls Ollama to generate a custom `execute(args: dict)` function. The generated code runs in a restricted sandbox with only these helper functions available:
+When a tool is confirmed, `executor_node` calls the LLM to generate a custom `execute(args: dict)` function. The generated code runs in a restricted sandbox with only these helper functions available:
 
 | Function | What it does |
 |---|---|
-| `check_calendar(person)` | Returns the next upcoming calendar event involving the person |
-| `check_notion(person)` | Returns open Notion tasks mentioning the person |
-| `create_calendar_event(person, topic, time_str, duration_minutes)` | Creates a calendar event |
-| `add_notion_page(title, notes)` | Creates a new Notion page |
-| `post_slack(text)` | Posts a message to the default Slack channel |
-| `draft_message(person, calendar_result, notion_result)` | Builds a check-in message combining calendar and Notion results |
+| `calendar_read(person)` | Returns the next upcoming calendar event involving the person |
+| `calendar_write(person, topic, start_datetime, end_datetime, email)` | Creates a calendar event and sends an invite |
+| `notion_read(query)` | Returns open Notion tasks mentioning a person or keyword |
+| `notion_write(title, notes)` | Creates a new Notion page |
+| `slack_read(channel, limit)` | Returns recent messages from a Slack channel |
+| `slack_write(text, channel)` | Posts a message to a Slack channel |
+| `slack_create_channel(name)` | Creates a new public Slack channel |
+| `slack_invite(channel_id, user_ids)` | Invites people (by Slack ID or display name) to a channel |
+
+Some values a tool needs are constant across every run instead of typed by the user each time (e.g. the same list of invitees) — these are captured as `fixed_args` at detection time and baked into `args` automatically before `execute()` runs.
+
+Legacy names from before this rename (`check_calendar`, `check_notion`, `send_calendar_invite`, `write_notion_page`, `send_slack_message`) are still available in the sandbox too, so tools saved before the rename keep working without regenerating their executor code.
 
 ---
 
@@ -252,7 +266,9 @@ When a tool is confirmed, `executor_node` calls Ollama to generate a custom `exe
 main.py            — entry point, starts all threads
 agent_graph.py     — LangGraph graph wiring and public API
 nodes.py           — all node functions + AgentState schema
-detect.py          — time-based clustering + Ollama routine interpretation
+detect.py          — time-based clustering + LLM routine interpretation
+llm.py             — shared OpenRouter chat helper (used by detect.py and nodes.py)
+matching.py        — fuzzy sequence-similarity matching for pattern detection
 poller.py          — Google Calendar, Notion, and Slack pollers
 tools.py           — executor helper functions (calendar, notion, slack)
 executors.py       — deprecated shim that re-exports from tools.py
@@ -278,24 +294,24 @@ token_{user_id}.json    — per-user Google Calendar tokens (auto-generated)
 
 ```
 Google Calendar ──┐
-Notion           ──┼──► poller ──► event_log.json ──► cluster ──► Ollama (llm_node)
+Notion           ──┼──► poller ──► event_log.json ──► cluster ──► LLM (llm_node)
 Slack history    ──┘                                                      │
                                                                           ▼
                                                                    pattern detection
-                                                                    (args schema)
+                                                              (fuzzy match, args schema)
                                                                           │
-                                                                 Ollama (propose_node)
+                                                                  LLM (propose_node)
                                                                           │
                                                                  Slack DM to user
                                                                           │
                                                       ┌───────────────────┤
                                                    "yes"            change request
                                                       │                   │
-                                                      │          Ollama (re_propose)
+                                                      │           LLM (re_propose)
                                                       │                   │
                                                       │            re-DM user (loop)
                                                       │
-                                             Ollama (executor_node)
+                                              LLM (executor_node)
                                               generates execute(args)
                                                       │
                                                 tools_store.json
