@@ -1,4 +1,4 @@
-# Tool Synthesis Agent
+# Talos
 
 An AI agent that watches your activity across Slack, Google Calendar, and Notion, detects repeated multi-step workflows, and proposes saving them as reusable tools — all without you having to define anything upfront.
 
@@ -69,8 +69,8 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 ### 1. Clone and install dependencies
 
 ```bash
-git clone <repo-url>
-cd Tool-synthesis-agent
+git clone https://github.com/itmesneha/Talos
+cd Talos
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
