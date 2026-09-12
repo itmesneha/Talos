@@ -514,6 +514,86 @@ def handle_run_tool_modal(ack, body, client, view):
     ).start()
 
 
+# ── PART 6: Proposal DM buttons (Save / Change / Discard) ────────────────────
+
+def _update_proposal_message(client, channel: str, ts: str, text: str) -> None:
+    """Replaces a proposal message's buttons with a plain status line once resolved."""
+    client.chat_update(
+        channel=channel,
+        ts=ts,
+        text=text,
+        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+    )
+
+
+@app.action("proposal_save")
+def handle_proposal_save(ack, body, client):
+    ack()
+    slack_id = body["user"]["id"]
+    channel = body["channel"]["id"]
+    ts = body["message"]["ts"]
+
+    from agent_graph import resume_for_user
+    handled = resume_for_user(slack_id, "yes", lambda text: _update_proposal_message(client, channel, ts, text))
+    if not handled:
+        _update_proposal_message(client, channel, ts, "_This proposal has expired._")
+
+
+@app.action("proposal_discard")
+def handle_proposal_discard(ack, body, client):
+    ack()
+    slack_id = body["user"]["id"]
+    channel = body["channel"]["id"]
+    ts = body["message"]["ts"]
+
+    from agent_graph import resume_for_user
+    handled = resume_for_user(slack_id, "no", lambda text: _update_proposal_message(client, channel, ts, text))
+    if not handled:
+        _update_proposal_message(client, channel, ts, "_This proposal has expired._")
+
+
+@app.action("proposal_change")
+def handle_proposal_change(ack, body, client):
+    ack()
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "proposal_change_modal",
+            "private_metadata": f"{body['channel']['id']}|{body['message']['ts']}",
+            "title": {"type": "plain_text", "text": "Request a change"},
+            "submit": {"type": "plain_text", "text": "Send"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "change_request",
+                    "label": {"type": "plain_text", "text": "What would you like to change?"},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "value",
+                        "multiline": True,
+                        "placeholder": {"type": "plain_text", "text": "e.g. call it prep_meeting, or add a topic argument"},
+                    },
+                }
+            ],
+        },
+    )
+
+
+@app.view("proposal_change_modal")
+def handle_proposal_change_modal(ack, body, client, view):
+    ack()
+    slack_id = body["user"]["id"]
+    channel, ts = view["private_metadata"].split("|")
+    change_text = view["state"]["values"]["change_request"]["value"]["value"]
+
+    _update_proposal_message(client, channel, ts, f"✏️ _You asked to change: \"{change_text}\"_")
+
+    from agent_graph import resume_for_user
+    resume_for_user(slack_id, change_text, lambda text: None)
+
+
 def start_bot():
     # Start OAuth callback server before the Slack bot
     start_callback_server(on_token_saved=_on_calendar_connected)

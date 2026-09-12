@@ -147,6 +147,46 @@ def pattern_node(state: AgentState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared proposal message builder (used by propose_node and re_propose_node)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_proposal_blocks(pattern: dict, header: str) -> list[dict]:
+    steps_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(pattern.get("steps", [])))
+    tool_args = pattern.get("args") or []
+    args_str = "\n".join(
+        f"• `{a['name']}` — {a.get('description', '')}  _(e.g. {a.get('example', '...')})_"
+        for a in tool_args
+    ) or "_(none)_"
+
+    sequence_line = ""
+    if pattern.get("sequence"):
+        sequence_line = (
+            f"You've done this *{len(pattern['sequence'])}-step sequence* at least twice:\n"
+            f"`{' → '.join(pattern['sequence'])}`\n\n"
+        )
+
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"{sequence_line}"
+            f"*Proposed tool:* `{pattern.get('tool_name', '')}`\n_{pattern.get('description', '')}_"
+        )}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*What it does:*\n{steps_str}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Arguments you provide each run:*\n{args_str}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Example usage:*\n`{pattern.get('example', '')}`"}},
+        {
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✅ Save", "emoji": True}, "style": "primary", "action_id": "proposal_save"},
+                {"type": "button", "text": {"type": "plain_text", "text": "✏️ Change", "emoji": True}, "action_id": "proposal_change"},
+                {"type": "button", "text": {"type": "plain_text", "text": "❌ Discard", "emoji": True}, "style": "danger", "action_id": "proposal_discard"},
+            ],
+        },
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "You can also just reply here with a change request in plain English."}]},
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Node 5 — propose_node
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -201,27 +241,8 @@ Reply with ONLY valid JSON:
 
     pattern.update(definition)
 
-    # Build DM text
-    steps_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(definition["steps"]))
-    tool_args = definition.get("args") or []
-    args_str  = "\n".join(
-        f"  • `{a['name']}` — {a.get('description', '')}  _(e.g. {a.get('example', '...')})_"
-        for a in tool_args
-    ) or "  _(none)_"
-    msg = (
-        f":mag: *I noticed a repeated workflow pattern!*\n\n"
-        f"You've done this *{len(pattern['sequence'])}-step sequence* at least twice:\n"
-        f"`{' → '.join(pattern['sequence'])}`\n\n"
-        f"*Proposed tool:* `{definition['tool_name']}`\n"
-        f"_{definition['description']}_\n\n"
-        f"*What it does:*\n{steps_str}\n\n"
-        f"*Arguments you provide each run:*\n{args_str}\n\n"
-        f"*Example usage:*\n  `{definition['example']}`\n\n"
-        f"───────────────────────\n"
-        f"*yes* — save this tool\n"
-        f"*no* — discard\n"
-        f"or describe any change you'd like (e.g. _call it prep_meeting_ or _add a topic argument_)"
-    )
+    blocks = _build_proposal_blocks(pattern, ":mag: *I noticed a repeated workflow pattern!*")
+    fallback_text = f"I noticed a repeated workflow pattern — proposed tool: {definition.get('tool_name', '')}"
 
     # Lazy import to avoid circular dependency (slack_bot imports agent_graph)
     from slack_bot import app as _slack_app
@@ -229,7 +250,7 @@ Reply with ONLY valid JSON:
     slack_id = users[user_id]["slack_id"]
     dm = _slack_app.client.conversations_open(users=slack_id)
     dm_channel = dm["channel"]["id"]
-    _slack_app.client.chat_postMessage(channel=dm_channel, text=msg)
+    _slack_app.client.chat_postMessage(channel=dm_channel, blocks=blocks, text=fallback_text)
 
     print(f"[node:propose] DM sent to {user_id} ({slack_id}) via {dm_channel}")
     return {"pattern": pattern, "tool_definition": definition, "dm_channel": dm_channel}
@@ -340,27 +361,12 @@ def re_propose_node(state: AgentState) -> dict:
     users = get_users()
     slack_id = users[user_id]["slack_id"]
 
-    steps_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(pattern.get("steps", [])))
-    tool_args = pattern.get("args") or []
-    args_str  = "\n".join(
-        f"  • `{a['name']}` — {a.get('description', '')}  _(e.g. {a.get('example', '...')})_"
-        for a in tool_args
-    ) or "  _(none)_"
-    msg = (
-        f"✏️ *Got it — here's the updated tool:*\n\n"
-        f"*Name:* `{pattern['tool_name']}`\n"
-        f"*Description:* _{pattern.get('description', '')}_\n"
-        f"*Arguments:*\n{args_str}\n"
-        f"*Steps:*\n{steps_str}\n\n"
-        f"───────────────────────\n"
-        f"*yes* — save this tool\n"
-        f"*no* — discard\n"
-        f"or describe another change"
-    )
+    blocks = _build_proposal_blocks(pattern, "✏️ *Got it — here's the updated tool:*")
+    fallback_text = f"Updated tool proposal: {pattern.get('tool_name', '')}"
 
     dm = _slack_app.client.conversations_open(users=slack_id)
     dm_channel = dm["channel"]["id"]
-    _slack_app.client.chat_postMessage(channel=dm_channel, text=msg)
+    _slack_app.client.chat_postMessage(channel=dm_channel, blocks=blocks, text=fallback_text)
 
     print(f"[node:re_propose] sent updated proposal for '{pattern['tool_name']}' to {user_id}")
     return {

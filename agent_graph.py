@@ -232,17 +232,14 @@ def resume_for_user(slack_id: str, user_text: str, say) -> bool:
     final_state = agent_graph.get_state(config).values
     pattern = final_state.get("pattern") if isinstance(final_state, dict) else None
 
-    if "yes" in lower:
-        if pattern and pattern.get("confirmed"):
-            tool_name = pattern["tool_name"]
-            example = pattern.get("example") or f"/tool {tool_name} for [name]"
-            say(
-                f"✅ *Saved `{tool_name}`!*\n"
-                f"_{pattern.get('description', '')}_\n\n"
-                f"Run it anytime with:\n`{example}`"
-            )
-        else:
-            say("Something went wrong while saving. Try again with `!poll now`.")
+    if pattern and pattern.get("confirmed"):
+        tool_name = pattern["tool_name"]
+        example = pattern.get("example") or f"/tool {tool_name} for [name]"
+        say(
+            f"✅ *Saved `{tool_name}`!*\n"
+            f"_{pattern.get('description', '')}_\n\n"
+            f"Run it anytime with:\n`{example}`"
+        )
     else:
         say("Discarded. I'll let you know if I spot another pattern.")
 
