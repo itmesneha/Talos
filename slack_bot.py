@@ -149,6 +149,26 @@ def handle_message(message, say, client):
         say("Agent run triggered — check your DMs if a new pattern was found.")
         return
 
+    # Manual demo trigger — skip detection and send a fake proposal DM
+    # (useful for previewing the Save/Change/Discard buttons without real repeated activity)
+    if text == "!fake proposal":
+        import time as _time
+        from agent_graph import agent_graph as _graph, _pending_threads
+
+        fake_pattern = {
+            "sequence": ["calendar", "notion", "slack"],
+            "description": "DEMO — preview of the proposal buttons (safe to Discard).",
+            "args": [{"name": "person", "description": "who to sync with", "example": "Alice"}],
+        }
+        thread_id = f"demo-{user_id}-{int(_time.time())}"
+        config = {"configurable": {"thread_id": thread_id}}
+        _graph.update_state(config, {"user_id": user_id, "pattern": fake_pattern}, as_node="pattern")
+        _graph.invoke(None, config=config)
+        _pending_threads[slack_user_id] = (thread_id, _time.time())
+        if message.get("channel_type") != "im":
+            say("Sent you a demo proposal — check your DMs!")
+        return
+
     # Pending proposal? Route reply through LangGraph resume
     from agent_graph import resume_for_user
     if resume_for_user(slack_user_id, text, say):
