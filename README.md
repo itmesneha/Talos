@@ -57,7 +57,7 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 ## Prerequisites
 
 - Python 3.11+
-- [Ollama](https://ollama.com) running locally with `llama3.1:8b` pulled
+- [Ollama](https://ollama.com) running locally with `llama3.1:8b` pulled — required for pattern **detection** (`llm_node`). The proposal, re-proposal, and executor-generation steps degrade gracefully to simpler fallbacks without it, but no new patterns will ever be detected if Ollama isn't running.
 - A Slack workspace where you can create apps
 - A Notion integration (optional)
 - A Google Calendar OAuth credential (optional)
@@ -160,9 +160,14 @@ On startup the bot will:
 3. Scan the workspace — auto-register any members not yet in `users.json`, and DM anyone missing calendar auth
 4. Begin the agent loop (runs every 15 seconds)
 
-### Manual trigger (for testing)
+### Manual triggers (for testing)
 
-Send `!poll now` in any Slack channel the bot can see. It will immediately poll and detect patterns, then DM you if one is found.
+Send these as a message to Talos (DM or any channel it's been invited to):
+
+| Command | What it does |
+|---|---|
+| `!poll now` | Immediately poll and run detection, then DM you if a pattern is found |
+| `!fake proposal` | Skip detection entirely and send yourself a demo proposal DM — useful for previewing the Save/Change/Discard buttons without needing real repeated activity or Ollama |
 
 ### Seeding mock events (for demos)
 
@@ -186,38 +191,23 @@ Send `!poll now` in any Slack channel the bot can see. It will immediately poll 
 
 ### App Home
 
-Open the bot's App Home tab in Slack to see all your saved tools at a glance.
+Open Talos's App Home tab in Slack to see:
+
+- **Your saved tools** — each shown as a card with a **▶ Run** button. Tools with no arguments run immediately in a DM; tools with arguments open a modal to fill them in.
+- **Recent activity** — the last 8 events Talos has observed for you (calendar/Notion/Slack), newest first.
+- A **🔄 Refresh** button to re-pull the view.
+
+If you haven't connected Google Calendar yet, Home shows a **Connect Google Calendar** button instead (opens the OAuth link directly).
 
 ### When a pattern is detected
 
-The bot DMs you:
+Talos DMs you a proposal card with the sequence, proposed tool name/description, steps, arguments, and example usage, followed by three buttons:
 
-```
-I noticed a repeated workflow pattern!
+- **✅ Save** — saves the tool immediately
+- **✏️ Change** — opens a modal to describe what you'd like different (e.g. _call it prep_meeting_ or _add a topic argument_); Talos applies it via Ollama and re-sends an updated proposal with fresh buttons. This loops until you Save or Discard.
+- **❌ Discard** — drops the proposal
 
-You've done this 3-step sequence at least twice:
-`calendar → notion → slack`
-
-Proposed tool: `weekly_sync`
-Checks your calendar, open Notion tasks, and sends a check-in message.
-
-Arguments you provide each run:
-  • `person` — who the sync is with  (e.g. Alice)
-
-Example: /tool weekly_sync person=Alice
-
-Reply yes to save, no to discard, or describe a change.
-```
-
-**Responding:**
-- `yes` — saves the tool immediately
-- `no` — discards the proposal
-- Anything else is treated as a **change request** — Ollama applies it and re-sends the updated proposal. This loops until you say yes or no.
-
-  Examples:
-  - `call it prep_meeting` — renames the tool
-  - `add a topic argument` — Ollama updates the args list
-  - `the description should be: prep for weekly check-ins` — updates description
+You can also just reply in the thread with a change request in plain English instead of clicking Change — both work.
 
 ### Running a saved tool
 
@@ -279,6 +269,8 @@ state.json              — per-user last-polled timestamps
 credentials.json        — Google OAuth client credentials (you provide this)
 token_{user_id}.json    — per-user Google Calendar tokens (auto-generated)
 ```
+
+`users.json`, `state.json`, `tools_store.json`, `event_log.json`, `credentials.json`, and `token_{user_id}.json` are all gitignored — they hold real workspace/user data generated at runtime, not source. A fresh clone starts with none of them; they're created automatically as people set up and use the bot.
 
 ---
 
