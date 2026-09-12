@@ -34,3 +34,6 @@ event_log.json
 
 # macOS
 .DS_Store
+
+# Runtime logs
+*.log
