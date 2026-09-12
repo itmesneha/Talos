@@ -1,18 +1,29 @@
 import os
 import re
+import threading
 import time
+from datetime import datetime
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
 load_dotenv()
 
 from storage import (
-    get_users, get_tools, write_json, read_json,
+    get_users, get_tools, get_events, write_json, read_json,
     find_matching_tool, slack_id_to_user_id,
 )
 from calendar_auth import (
     is_calendar_connected, generate_auth_url, start_callback_server,
 )
+
+SOURCE_ICON = {"calendar": "📅", "notion": "📝", "slack": "💬"}
+
+
+def _format_event_time(raw: str) -> str:
+    try:
+        return datetime.fromisoformat(raw).strftime("%b %d, %I:%M %p").replace(" 0", " ")
+    except ValueError:
+        return raw
 
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 
@@ -303,6 +314,100 @@ def handle_team_join(event, client):
     _prompt_calendar_setup(user_id, slack_user_id, client)
 
 
+def _build_home_view(user_id: str) -> dict:
+    """Builds the App Home view: saved tools (with Run buttons) + a recent activity feed."""
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "🔺 Talos", "emoji": True}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "I watch your activity and turn repeated workflows into tools you can run on demand."}]},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*🧰 Your saved tools*"}},
+    ]
+
+    tools = get_tools(user_id)
+    if not tools:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No tools saved yet — I'll DM you a proposal when I spot a repeated pattern._"},
+        })
+    else:
+        for t in tools:
+            tool_args = t.get("args") or []
+            arg_hint = ", ".join(a["name"] for a in tool_args) if tool_args else "no arguments"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*`{t['tool_name']}`*\n{t.get('description', '')}\n_args: {arg_hint}_",
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "▶ Run", "emoji": True},
+                    "style": "primary",
+                    "action_id": "run_tool",
+                    "value": t["tool_name"],
+                },
+            })
+
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*📜 Recent activity*"}})
+
+    events = sorted(get_events(user_id), key=lambda e: e.get("time", ""), reverse=True)[:8]
+    if not events:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_Nothing observed yet._"},
+        })
+    else:
+        for e in events:
+            icon = SOURCE_ICON.get(e.get("source"), "🔹")
+            blocks.append({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": f"{icon} *{e.get('source', 'event')}* — {e.get('text', '')}  ·  _{_format_event_time(e.get('time', ''))}_",
+                }],
+            })
+
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "🔄 Refresh", "emoji": True},
+            "action_id": "refresh_home",
+        }],
+    })
+
+    return {"type": "home", "blocks": blocks}
+
+
+def _build_calendar_prompt_view(user_id: str, slack_user_id: str) -> dict:
+    """Home view shown until the user connects Google Calendar."""
+    try:
+        auth_url = generate_auth_url(user_id, slack_user_id)
+        button = {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Connect Google Calendar", "emoji": True},
+                "style": "primary",
+                "url": auth_url,
+                "action_id": "noop_connect_calendar",
+            }],
+        }
+    except FileNotFoundError:
+        button = {"type": "section", "text": {"type": "mrkdwn", "text": "_Calendar setup isn't configured yet — ask an admin._"}}
+
+    return {
+        "type": "home",
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": "🔺 Talos", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "To start watching your activity I need access to your Google Calendar."}},
+            button,
+        ],
+    }
+
+
 @app.event("app_home_opened")
 def handle_app_home_opened(event, client):
     slack_user_id = event["user"]
@@ -310,30 +415,103 @@ def handle_app_home_opened(event, client):
     # Register if new
     user_id = _register_user_if_new(slack_user_id, client)
 
-    # Prompt calendar setup if not yet connected
     if not is_calendar_connected(user_id):
-        _prompt_calendar_setup(user_id, slack_user_id, client)
+        client.views_publish(user_id=slack_user_id, view=_build_calendar_prompt_view(user_id, slack_user_id))
         return
 
-    # Already set up — show status in App Home
-    tools = get_tools(user_id)
-    tool_lines = "\n".join(
-        f"• `{t['tool_name']}` — {t.get('description', '')}"
-        for t in tools
-    ) or "_No tools saved yet. I'll propose one when I detect a pattern._"
+    client.views_publish(user_id=slack_user_id, view=_build_home_view(user_id))
 
-    client.views_publish(
-        user_id=slack_user_id,
+
+# A button with a "url" doesn't fire an action we act on server-side, but Bolt still
+# requires block actions to be acknowledged or it logs an "unhandled request" warning.
+@app.action("noop_connect_calendar")
+def handle_noop_connect_calendar(ack):
+    ack()
+
+
+@app.action("refresh_home")
+def handle_refresh_home(ack, body, client):
+    ack()
+    slack_user_id = body["user"]["id"]
+    user_id = slack_id_to_user_id(slack_user_id)
+    if user_id:
+        client.views_publish(user_id=slack_user_id, view=_build_home_view(user_id))
+
+
+@app.action("run_tool")
+def handle_run_tool_button(ack, body, client):
+    ack()
+    slack_user_id = body["user"]["id"]
+    user_id = slack_id_to_user_id(slack_user_id)
+    if not user_id:
+        return
+
+    tool_name = body["actions"][0]["value"]
+    tool = next((t for t in get_tools(user_id) if t["tool_name"] == tool_name), None)
+    if not tool:
+        return
+
+    tool_args = tool.get("args") or []
+    if not tool_args:
+        # No arguments needed — run it straight away in a DM
+        dm_channel = _open_dm(slack_user_id, client)
+        from agent_graph import run_tool_graph
+        threading.Thread(
+            target=run_tool_graph, args=(user_id, tool, {}, dm_channel), daemon=True
+        ).start()
+        return
+
+    # Has arguments — collect them via a modal
+    client.views_open(
+        trigger_id=body["trigger_id"],
         view={
-            "type": "home",
+            "type": "modal",
+            "callback_id": "run_tool_modal",
+            "private_metadata": tool_name,
+            "title": {"type": "plain_text", "text": tool_name[:24] or "Run tool"},
+            "submit": {"type": "plain_text", "text": "Run"},
+            "close": {"type": "plain_text", "text": "Cancel"},
             "blocks": [
-                {"type": "section", "text": {"type": "mrkdwn", "text": "*Your saved tools:*"}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": tool_lines}},
-                {"type": "divider"},
-                {"type": "section", "text": {"type": "mrkdwn", "text": "_Type `/tool` in any channel to run a tool._"}},
+                {
+                    "type": "input",
+                    "block_id": f"arg_{a['name']}",
+                    "label": {"type": "plain_text", "text": a["name"]},
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "value",
+                        "placeholder": {"type": "plain_text", "text": a.get("example", "")[:150] or " "},
+                    },
+                }
+                for a in tool_args
             ],
         },
     )
+
+
+@app.view("run_tool_modal")
+def handle_run_tool_modal(ack, body, client, view):
+    ack()
+    slack_user_id = body["user"]["id"]
+    user_id = slack_id_to_user_id(slack_user_id)
+    if not user_id:
+        return
+
+    tool_name = view["private_metadata"]
+    tool = next((t for t in get_tools(user_id) if t["tool_name"] == tool_name), None)
+    if not tool:
+        return
+
+    args = {
+        block_id[len("arg_"):]: values["value"]["value"]
+        for block_id, values in view["state"]["values"].items()
+        if values.get("value", {}).get("value")
+    }
+
+    dm_channel = _open_dm(slack_user_id, client)
+    from agent_graph import run_tool_graph
+    threading.Thread(
+        target=run_tool_graph, args=(user_id, tool, args, dm_channel), daemon=True
+    ).start()
 
 
 def start_bot():
