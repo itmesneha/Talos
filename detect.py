@@ -1,12 +1,46 @@
 import json
 import re
 import sys
-import ollama
+import requests
+import llm
 from storage import get_users, get_events, tool_already_saved
+from matching import group_similar_sequences
 from dotenv import load_dotenv
 load_dotenv()
 
-OLLAMA_MODEL = "llama3.1:8b"
+# Words too generic to identify a specific project/person/topic when spotted
+# in event text — excluded from entity-overlap clustering below.
+_ENTITY_STOPWORDS = {
+    "the", "this", "that", "with", "for", "and", "new", "meeting", "project",
+    "check", "checked", "notes", "prep", "update", "updated", "added",
+    "created", "invite", "invited", "slack", "notion", "calendar", "hi",
+    "kickoff", "team", "message", "messaged", "page", "channel", "template",
+}
+
+
+def _extract_entities(text: str) -> set[str]:
+    """
+    Pull likely project/person-name tokens out of an event's text — a cheap,
+    deterministic stand-in for "these events are about the same thing".
+    Normalizes to lowercase since the same name shows up capitalized in
+    Notion/Calendar text ("Falcon") but lowercase-slugged in Slack channel
+    names ("#project-falcon").
+    """
+    text = text or ""
+    entities = set()
+
+    # Proper-noun-looking words (as they appear in Notion/Calendar titles)
+    for w in re.findall(r"\b[A-Za-z][a-zA-Z0-9'-]+\b", text):
+        if w[0].isupper() and w.lower() not in _ENTITY_STOPWORDS:
+            entities.add(w.lower())
+
+    # Slack channel-name slugs, e.g. "#project-falcon" -> {"project", "falcon"}
+    for slug in re.findall(r"#([\w-]+)", text):
+        for part in re.split(r"[-_]", slug):
+            if len(part) >= 3 and part.lower() not in _ENTITY_STOPWORDS:
+                entities.add(part.lower())
+
+    return entities
 
 
 def _extract_json(text: str) -> dict:
@@ -45,27 +79,48 @@ def _extract_json(text: str) -> dict:
 def cluster_by_time(events: list[dict], window_minutes: int = 10) -> list[list[dict]]:
     """
     Pure function — no API calls.
-    Groups consecutive events within window_minutes of each other.
+    Groups events into a cluster when EITHER:
+      - the gap to the previous event is within window_minutes, OR
+      - the event shares an entity (e.g. a project/person name) with
+        something already in the current cluster, however far apart in time.
+
+    The entity check is what lets a ritual that unfolds over an hour+
+    (Notion project page now, Slack channel 45 min later) still cluster as
+    one candidate routine instead of being time-sliced apart.
     """
     if not events:
         return []
 
-    sorted_events = sorted(events, key=lambda e: e["time"])
+    from datetime import datetime
+
+    def _parse_time(t: str) -> datetime:
+        return datetime.fromisoformat(t.replace("Z", "+00:00"))
+
+    # Sort by actual instant, not raw ISO string — sources mix timezone
+    # offsets (Google Calendar returns "+08:00", others "Z"), and comparing
+    # those as strings puts events in the wrong order, producing negative
+    # "gaps" that trivially pass any window check.
+    sorted_events = sorted(events, key=lambda e: _parse_time(e["time"]))
     clusters = []
     current = [sorted_events[0]]
+    current_entities = set(_extract_entities(sorted_events[0].get("text", "")))
 
     for event in sorted_events[1:]:
-        from datetime import datetime
-        prev_time = datetime.fromisoformat(current[-1]["time"].replace("Z", "+00:00"))
-        curr_time = datetime.fromisoformat(event["time"].replace("Z", "+00:00"))
+        prev_time = _parse_time(current[-1]["time"])
+        curr_time = _parse_time(event["time"])
         gap_minutes = (curr_time - prev_time).total_seconds() / 60
 
-        if gap_minutes <= window_minutes:
+        event_entities = _extract_entities(event.get("text", ""))
+        shares_entity = bool(event_entities & current_entities)
+
+        if gap_minutes <= window_minutes or shares_entity:
             current.append(event)
+            current_entities |= event_entities
         else:
             if len(current) >= 2:
                 clusters.append(current)
             current = [event]
+            current_entities = set(event_entities)
 
     if len(current) >= 2:
         clusters.append(current)
@@ -79,7 +134,7 @@ def interpret_cluster(cluster: list[dict]) -> dict | None:
     Retries once on malformed output.
     """
     events_text = "\n".join(
-        f"- [{e['source']}] {e['time']}: {e['text']}"
+        f"- [{e['source']}{':' + e['action'] if e.get('action') else ''}] {e['time']}: {e['text']}"
         for e in cluster
     )
 
@@ -89,37 +144,52 @@ Events (in time order):
 {events_text}
 
 Determine if these events represent one coherent multi-step routine a user repeats.
+Use the content of each event (names, project titles, recurring phrases) — not just
+timing — to judge whether these belong together. For example, if a Notion event and
+a later Slack event both mention the same project name, treat that as strong evidence
+they're part of the same routine even if they weren't close in time.
 
 Reply with ONLY a valid JSON object, no explanation, no markdown:
 {{
   "is_routine": true,
   "sequence": ["source1", "source2"],
   "args": [
-    {{"name": "arg_name", "description": "what this argument represents", "example": "example value"}}
+    {{"name": "arg_name", "description": "what this argument represents (varies each time the routine runs)", "example": "example value"}}
+  ],
+  "fixed_args": [
+    {{"name": "fixed_name", "value": "the constant value or list of values that stays the same every time"}}
   ],
   "description": "one sentence describing the routine"
 }}
 
-If there are multiple things that vary (e.g. a person AND a topic), include one entry per arg.
-If nothing varies, use an empty list for args.
+Use the "source:action" label from each event line (e.g. "notion.page_created",
+"slack.channel_created", "slack.member_invited") as the sequence entry when an
+action is present; otherwise use just the source name.
+
+"args" is for things that differ between occurrences (e.g. the project name) —
+the user will supply these each time the tool runs.
+"fixed_args" is for things that stay identical across occurrences (e.g. the same
+4-5 people invited every time, the same Notion template, a fixed channel-naming
+convention) — these get baked into the tool instead of asked for each run.
+If nothing varies, use an empty list for args. If nothing is constant, use an
+empty list for fixed_args.
 If these events are NOT a routine, reply with exactly: {{"is_routine": false}}"""
 
     for attempt in range(3):
         try:
-            print(f"[ollama] calling {OLLAMA_MODEL} (attempt {attempt + 1}/3) with {len(cluster)} events ...")
-            resp = ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            raw = resp["message"]["content"].strip()
-            print(f"[ollama] raw response: {raw[:200]}{'...' if len(raw) > 200 else ''}")
+            print(f"[llm] calling {llm.OPENROUTER_MODEL} (attempt {attempt + 1}/3) with {len(cluster)} events ...")
+            raw = llm.chat(prompt).strip()
+            print(f"[llm] raw response: {raw[:200]}{'...' if len(raw) > 200 else ''}")
             result = _extract_json(raw)
-            print(f"[ollama] parsed: is_routine={result.get('is_routine')}, sequence={result.get('sequence')}")
+            print(f"[llm] parsed: is_routine={result.get('is_routine')}, sequence={result.get('sequence')}")
             if result.get("is_routine"):
+                result.setdefault("fixed_args", [])
                 return result
             return None
         except (json.JSONDecodeError, KeyError) as e:
-            print(f"[ollama] parse error (attempt {attempt + 1}/3): {e}")
+            print(f"[llm] parse error (attempt {attempt + 1}/3): {e}")
+        except (requests.RequestException, RuntimeError) as e:
+            print(f"[llm] request error (attempt {attempt + 1}/3): {e}")
     return None
 
 
@@ -140,18 +210,12 @@ def find_repeated_pattern(user_id: str) -> dict | None:
         if result:
             interpreted.append(result)
 
-    # Find if 2+ clusters share the same sequence
-    from collections import Counter
-    sequence_counts = Counter(
-        tuple(r["sequence"]) for r in interpreted
-    )
-
-    for sequence_tuple, count in sequence_counts.items():
-        if count >= 2:
-            # Return the most recent matching cluster's interpretation
-            for r in reversed(interpreted):
-                if tuple(r["sequence"]) == sequence_tuple:
-                    return r
+    # Find if 2+ clusters describe substantially the same routine.
+    # Fuzzy (set-overlap) instead of exact-tuple equality — a ritual missing
+    # one step on a given occurrence still counts as a repeat.
+    for group in group_similar_sequences(interpreted):
+        if len(group) >= 2:
+            return group[-1]  # most recent matching interpretation
 
     return None
 

@@ -41,6 +41,7 @@
         "channels:manage",
         "channels:read",
         "channels:write.invites",
+        "channels:read",
         "chat:write",
         "commands",
         "groups:history",
