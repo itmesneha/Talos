@@ -20,6 +20,12 @@ SOURCE_ICON = {"calendar": "📅", "notion": "📝", "slack": "💬"}
 
 
 def _format_event_time(raw: str) -> str:
+    # Slack event timestamps are Unix epoch seconds (e.g. "1789191640.425229"),
+    # calendar/notion timestamps are ISO8601 — try both.
+    try:
+        return datetime.fromtimestamp(float(raw)).strftime("%b %d, %I:%M %p").replace(" 0", " ")
+    except (ValueError, OSError):
+        pass
     try:
         return datetime.fromisoformat(raw).strftime("%b %d, %I:%M %p").replace(" 0", " ")
     except ValueError:
