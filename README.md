@@ -35,13 +35,13 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 |---|---|
 | `poll` | Fetches new events from Google Calendar, Notion, and Slack |
 | `cluster` | Groups events that happen within a 10-minute window |
-| `llm` | Calls the LLM (OpenRouter, `openai/gpt-4o-mini` by default) on each cluster to decide if it's a routine |
-| `pattern` | Fuzzy-matches sequences that repeat 2+ times (tolerates a missing step) and aren't already saved |
-| `propose` | Generates a full tool definition via the LLM (with named `args` and `fixed_args`), DMs the user |
-| `human` | LangGraph interrupt — pauses the graph until the user replies |
+| `llm` | Calls OpenRouter on each cluster to decide if it's a routine |
+| `pattern` | Finds sequences that repeat 2+ times and aren't already saved |
+| `propose` | Generates a full tool definition via OpenRouter, DMs the user a proposal card |
+| `human` | LangGraph interrupt — pauses the graph until the user replies in Slack |
 | `confirm` | Routes to `executor` (yes), `re_propose` (change request), or `END` (no) |
-| `re_propose` | Applies a natural-language change request via the LLM and re-sends the proposal |
-| `executor` | Calls the LLM to generate a custom `execute(args: dict)` function for the tool |
+| `re_propose` | Applies a natural-language change request via OpenRouter and re-sends the proposal |
+| `executor` | Calls OpenRouter to generate a custom `execute(args: dict)` function for the tool |
 | `execute` | Runs a saved tool and posts a live-updating Slack checklist |
 
 ### Background Threads
@@ -50,6 +50,7 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 |---|---|---|
 | `agent` | every 15s | Runs the full LangGraph pipeline for all registered users |
 | `setup-checker` | every 1h | Scans the workspace, auto-registers new members, DMs anyone missing calendar auth |
+| `proposal-expiry` | every 10s | Discards proposals that have been pending > 2 minutes |
 | Slack bot | — | Socket Mode listener (blocking, keeps the process alive) |
 
 ---
@@ -57,9 +58,9 @@ When a user runs a saved tool, a separate single-node `execute_graph` runs it wi
 ## Prerequisites
 
 - Python 3.11+
-- An [OpenRouter](https://openrouter.ai) API key — used for pattern detection, proposal generation, and executor code generation (see `llm.py`). Detection (`llm_node`) fails gracefully and simply finds no patterns if the key is missing or a request fails; it doesn't crash the agent loop.
+- An [OpenRouter](https://openrouter.ai) API key — used for pattern detection, proposal generation, and executor code generation
 - A Slack workspace where you can create apps
-- A Notion integration (optional)
+- A Notion integration and database (optional)
 - A Google Calendar OAuth credential (optional)
 
 ---
@@ -78,7 +79,7 @@ pip install -r requirements.txt
 
 ### 2. Get an OpenRouter API key
 
-Sign up at [openrouter.ai](https://openrouter.ai) and create an API key — you'll add it to `.env` in step 4.
+Sign up at [openrouter.ai](https://openrouter.ai), create an API key, and add it to `.env` in step 4.
 
 ### 3. Create a Slack App
 
@@ -138,7 +139,7 @@ SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
 SLACK_CHANNEL=C0...
 
-# OpenRouter (LLM calls in detect.py / nodes.py)
+# OpenRouter
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=openai/gpt-4o-mini
 
@@ -147,12 +148,30 @@ NOTION_TOKEN=secret_...
 NOTION_DB_ID=...
 ```
 
-### 5. Google Calendar (optional)
+### 5. Notion (optional)
+
+1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations) → **New integration** → copy the **Internal Integration Token** → this is your `NOTION_TOKEN`
+2. Copy the database ID from the database URL:
+   `https://notion.so/workspace/`**`<database-id>`**`?v=...`
+   → this is your `NOTION_DB_ID`
+3. **Connect the integration to your database** — this step is required even if your token and ID are correct:
+   - Open the database in Notion
+   - Click `...` (top-right) → **Connections** → find your integration → click **Connect**
+
+### 6. Google Calendar (optional)
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com) → create a project → enable the **Google Calendar API**
 2. **APIs & Services → Credentials** → create an **OAuth 2.0 Client ID** (Desktop app) → download as `credentials.json` into the project root
 
-The bot handles the rest automatically. When it starts, it scans the workspace and DMs any user who hasn't connected their calendar yet with an OAuth link. The user clicks it, approves in the browser, and the token is saved. A local callback server runs on `http://localhost:8080` to receive the OAuth redirect.
+The bot handles the rest automatically. When it starts, it scans the workspace and DMs any user who hasn't connected their calendar yet with an OAuth link. The user clicks it, approves in the browser, and a token is saved locally. A callback server runs on `http://localhost:8080` to receive the OAuth redirect.
+
+> **Note:** The OAuth token is created with full `calendar` read+write scope so Talos can both read events and create calendar invites.
+
+To manually trigger the OAuth flow for a user:
+
+```bash
+python test_calendar_auth.py u11
+```
 
 ---
 
@@ -168,21 +187,21 @@ On startup the bot will:
 3. Scan the workspace — auto-register any members not yet in `users.json`, and DM anyone missing calendar auth
 4. Begin the agent loop (runs every 15 seconds)
 
-### Manual triggers (for testing)
+### Manual triggers
 
 Send these as a message to Talos (DM or any channel it's been invited to):
 
 | Command | What it does |
 |---|---|
 | `!poll now` | Immediately poll and run detection, then DM you if a pattern is found |
-| `!fake proposal` | Skip detection entirely and send yourself a demo proposal DM — useful for previewing the Save/Change/Discard buttons without needing real repeated activity or a working OpenRouter key |
 
 ### Seeding mock events (for demos)
 
-`seed.py` contains mock events for 10 users with a variety of workflow patterns. It is currently commented out (live polling is active). To restore mock data for a demo:
+`seed.py` contains mock events for 10 users with a variety of workflow patterns. Run it to pre-populate `event_log.json` so the agent detects patterns immediately without waiting for real activity:
 
-1. Open `seed.py` and uncomment the `events` list and `write_json` call
-2. Run `python seed.py`
+```bash
+python seed.py
+```
 
 ---
 
@@ -199,23 +218,17 @@ Send these as a message to Talos (DM or any channel it's been invited to):
 
 ### App Home
 
-Open Talos's App Home tab in Slack to see:
-
-- **Your saved tools** — each shown as a card with a **▶ Run** button. Tools with no arguments run immediately in a DM; tools with arguments open a modal to fill them in.
-- **Recent activity** — the last 8 events Talos has observed for you (calendar/Notion/Slack), newest first.
-- A **🔄 Refresh** button to re-pull the view.
-
-If you haven't connected Google Calendar yet, Home shows a **Connect Google Calendar** button instead (opens the OAuth link directly).
+Open Talos's App Home tab in Slack to see your saved tools. If you haven't connected Google Calendar yet, Home shows a **Connect Google Calendar** button instead.
 
 ### When a pattern is detected
 
-Talos DMs you a proposal card with the sequence, proposed tool name/description, steps, arguments, and example usage, followed by three buttons:
+Talos DMs you a proposal card with the sequence, proposed tool name, description, steps, and arguments, followed by three buttons:
 
 - **✅ Save** — saves the tool immediately
-- **✏️ Change** — opens a modal to describe what you'd like different (e.g. _call it prep_meeting_ or _add a topic argument_); Talos applies it via the LLM and re-sends an updated proposal with fresh buttons. This loops until you Save or Discard.
+- **✏️ Change** — describe what you'd like different (e.g. _call it prep\_meeting_ or _add a topic argument_); Talos applies it via OpenRouter and re-sends an updated proposal. This loops until you Save or Discard.
 - **❌ Discard** — drops the proposal
 
-You can also just reply in the thread with a change request in plain English instead of clicking Change — both work.
+You can also reply in plain English instead of clicking Change — both work. Proposals expire after **2 minutes** of no reply.
 
 ### Running a saved tool
 
@@ -223,13 +236,13 @@ You can also just reply in the thread with a change request in plain English ins
 /tool weekly_sync person=Alice
 ```
 
-Or just message the bot directly:
+Or message the bot directly:
 
 ```
 weekly_sync person=Alice
 ```
 
-Positional args also work if you only have one argument:
+Positional args work too:
 
 ```
 weekly_sync Alice
@@ -241,22 +254,44 @@ The bot posts a live Slack checklist that ticks off each step as it completes.
 
 ## Executor Sandbox
 
-When a tool is confirmed, `executor_node` calls the LLM to generate a custom `execute(args: dict)` function. The generated code runs in a restricted sandbox with only these helper functions available:
+When a tool is confirmed, `executor_node` calls OpenRouter to generate a custom `execute(args: dict)` function tailored to the tool's steps. The generated code runs in a restricted sandbox with only these helper functions available:
 
 | Function | What it does |
 |---|---|
-| `calendar_read(person)` | Returns the next upcoming calendar event involving the person |
-| `calendar_write(person, topic, start_datetime, end_datetime, email)` | Creates a calendar event and sends an invite |
+| `calendar_read(person)` | Returns the next upcoming calendar event for a person |
+| `calendar_write(person, topic, start_datetime, end_datetime, email)` | Creates a calendar event and sends an invite (`start_datetime` / `end_datetime` are ISO 8601 strings) |
 | `notion_read(query)` | Returns open Notion tasks mentioning a person or keyword |
 | `notion_write(title, notes)` | Creates a new Notion page |
 | `slack_read(channel, limit)` | Returns recent messages from a Slack channel |
 | `slack_write(text, channel)` | Posts a message to a Slack channel |
 | `slack_create_channel(name)` | Creates a new public Slack channel |
-| `slack_invite(channel_id, user_ids)` | Invites people (by Slack ID or display name) to a channel |
+| `slack_invite(channel_id, user_ids)` | Invites a list of Slack user IDs to a channel |
 
-Some values a tool needs are constant across every run instead of typed by the user each time (e.g. the same list of invitees) — these are captured as `fixed_args` at detection time and baked into `args` automatically before `execute()` runs.
+---
 
-Legacy names from before this rename (`check_calendar`, `check_notion`, `send_calendar_invite`, `write_notion_page`, `send_slack_message`) are still available in the sandbox too, so tools saved before the rename keep working without regenerating their executor code.
+## Testing
+
+`test_tools.py` runs each tool against real credentials to verify everything is wired up correctly:
+
+```bash
+python test_tools.py                   # all tests, user u11
+python test_tools.py --user u1         # different user
+python test_tools.py --only calendar   # one section only
+python test_tools.py --only notion
+python test_tools.py --only slack
+```
+
+`test_calendar_auth.py` tests the Google OAuth flow in isolation (opens a browser):
+
+```bash
+python test_calendar_auth.py u11
+```
+
+`test_checklist.py` posts a live tool-execution checklist to Slack using a fake tool:
+
+```bash
+python test_checklist.py
+```
 
 ---
 
@@ -266,27 +301,28 @@ Legacy names from before this rename (`check_calendar`, `check_notion`, `send_ca
 main.py            — entry point, starts all threads
 agent_graph.py     — LangGraph graph wiring and public API
 nodes.py           — all node functions + AgentState schema
-detect.py          — time-based clustering + LLM routine interpretation
-llm.py             — shared OpenRouter chat helper (used by detect.py and nodes.py)
-matching.py        — fuzzy sequence-similarity matching for pattern detection
+detect.py          — time-based clustering + OpenRouter routine interpretation
 poller.py          — Google Calendar, Notion, and Slack pollers
 tools.py           — executor helper functions (calendar, notion, slack)
 executors.py       — deprecated shim that re-exports from tools.py
 slack_bot.py       — Slack Bolt app, setup loop, message routing, tool runner
 calendar_auth.py   — Google OAuth flow + local callback server (port 8080)
 storage.py         — JSON file read/write helpers
-seed.py            — mock event data for demos (currently commented out)
+seed.py            — mock event data for demos
 
 slack_manifest.json     — import this to configure the Slack app in one step
-users.json              — registered users (auto-populated by setup_loop)
 event_log.json          — append-only log of polled events
 tools_store.json        — saved tools per user (includes generated executor code)
 state.json              — per-user last-polled timestamps
 credentials.json        — Google OAuth client credentials (you provide this)
 token_{user_id}.json    — per-user Google Calendar tokens (auto-generated)
+
+test_tools.py           — integration tests for all tools (uses real credentials)
+test_calendar_auth.py   — manual OAuth flow test
+test_checklist.py       — manual Slack checklist test
 ```
 
-`users.json`, `state.json`, `tools_store.json`, `event_log.json`, `credentials.json`, and `token_{user_id}.json` are all gitignored — they hold real workspace/user data generated at runtime, not source. A fresh clone starts with none of them; they're created automatically as people set up and use the bot.
+`event_log.json`, `tools_store.json`, `state.json`, `credentials.json`, and `token_{user_id}.json` are gitignored — they hold runtime data generated as people set up and use the bot.
 
 ---
 
@@ -294,24 +330,23 @@ token_{user_id}.json    — per-user Google Calendar tokens (auto-generated)
 
 ```
 Google Calendar ──┐
-Notion           ──┼──► poller ──► event_log.json ──► cluster ──► LLM (llm_node)
+Notion           ──┼──► poller ──► event_log.json ──► cluster ──► OpenRouter (llm_node)
 Slack history    ──┘                                                      │
                                                                           ▼
                                                                    pattern detection
-                                                              (fuzzy match, args schema)
                                                                           │
-                                                                  LLM (propose_node)
+                                                                 OpenRouter (propose_node)
                                                                           │
                                                                  Slack DM to user
                                                                           │
                                                       ┌───────────────────┤
                                                    "yes"            change request
                                                       │                   │
-                                                      │           LLM (re_propose)
+                                                      │          OpenRouter (re_propose)
                                                       │                   │
                                                       │            re-DM user (loop)
                                                       │
-                                              LLM (executor_node)
+                                              OpenRouter (executor_node)
                                               generates execute(args)
                                                       │
                                                 tools_store.json
