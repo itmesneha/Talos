@@ -152,7 +152,6 @@ they're part of the same routine even if they weren't close in time.
 Reply with ONLY a valid JSON object, no explanation, no markdown:
 {{
   "is_routine": true,
-  "sequence": ["source1", "source2"],
   "args": [
     {{"name": "arg_name", "description": "what this argument represents (varies each time the routine runs)", "example": "example value"}}
   ],
@@ -161,10 +160,6 @@ Reply with ONLY a valid JSON object, no explanation, no markdown:
   ],
   "description": "one sentence describing the routine"
 }}
-
-Use the "source:action" label from each event line (e.g. "notion.page_created",
-"slack.channel_created", "slack.member_invited") as the sequence entry when an
-action is present; otherwise use just the source name.
 
 "args" is for things that differ between occurrences (e.g. the project name) —
 the user will supply these each time the tool runs.
@@ -181,9 +176,17 @@ If these events are NOT a routine, reply with exactly: {{"is_routine": false}}""
             raw = llm.chat(prompt).strip()
             print(f"[llm] raw response: {raw[:200]}{'...' if len(raw) > 200 else ''}")
             result = _extract_json(raw)
-            print(f"[llm] parsed: is_routine={result.get('is_routine')}, sequence={result.get('sequence')}")
+            print(f"[llm] parsed: is_routine={result.get('is_routine')}")
             if result.get("is_routine"):
+                # Compute deterministically from the events rather than trusting
+                # the LLM's wording — asked twice for the same underlying routine,
+                # it doesn't reliably reproduce identical phrasing ("calendar" one
+                # call, "calendar.meeting_created" the next), which silently broke
+                # matching against already-saved tools and against other clusters
+                # of the same routine.
+                result["sequence"] = [e.get("action") or e["source"] for e in cluster]
                 result.setdefault("fixed_args", [])
+                print(f"[llm] sequence (derived): {result['sequence']}")
                 return result
             return None
         except (json.JSONDecodeError, KeyError) as e:
