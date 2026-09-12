@@ -55,6 +55,24 @@ def _safe_updated_min(last_polled: str) -> str:
     return last_polled
 
 
+def _calendar_action(item: dict) -> str:
+    """
+    Distinguishes a brand-new event from an edit to an existing one, using the
+    Calendar API's own created/updated timestamps (both are always present).
+    """
+    created = item.get("created", "")
+    updated = item.get("updated", "")
+    try:
+        from datetime import datetime as _dt
+        created_dt = _dt.fromisoformat(created.replace("Z", "+00:00"))
+        updated_dt = _dt.fromisoformat(updated.replace("Z", "+00:00"))
+        if abs((updated_dt - created_dt).total_seconds()) <= 5:
+            return "calendar.event_created"
+    except ValueError:
+        pass
+    return "calendar.event_updated"
+
+
 def poll_calendar(user_id: str, config: dict, last_polled: str) -> list[dict]:
     """Real Google Calendar API call using last_polled as updatedMin."""
     service = _get_calendar_service(user_id)
@@ -84,6 +102,7 @@ def poll_calendar(user_id: str, config: dict, last_polled: str) -> list[dict]:
         events.append({
             "user_id": user_id,
             "source":  "calendar",
+            "action":  _calendar_action(item),
             "time":    date_time,
             "text":    item.get("summary", "(no title)"),
         })
@@ -128,10 +147,68 @@ def poll_notion(user_id: str, config: dict, last_polled: str) -> list[dict]:
         events.append({
             "user_id": user_id,
             "source": "notion",
+            "action": _notion_action(page, title),
             "time": edited,
             "text": title,
         })
     return events
+
+
+def _notion_action(page: dict, title: str) -> str:
+    """
+    Distinguishes a brand-new page from an edit to an existing one, using the
+    page's own created_time/last_edited_time (both always present). Pages
+    whose title mentions "template" are tagged separately since applying a
+    template to a project page is the more specific action this ritual cares
+    about, not just "a page changed".
+    """
+    if "template" in title.lower():
+        return "notion.template_added"
+    created = page.get("created_time", "")
+    edited  = page.get("last_edited_time", "")
+    try:
+        from datetime import datetime as _dt
+        created_dt = _dt.fromisoformat(created.replace("Z", "+00:00"))
+        edited_dt  = _dt.fromisoformat(edited.replace("Z", "+00:00"))
+        if abs((edited_dt - created_dt).total_seconds()) <= 5:
+            return "notion.page_created"
+    except ValueError:
+        pass
+    return "notion.page_updated"
+
+
+def _slack_ts_to_iso(ts) -> str:
+    """Slack timestamps are `<unix seconds>.<microseconds>` — event_log.json
+    (and cluster_by_time's ISO parsing) expects RFC3339, so convert once here
+    rather than at every consumer."""
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _iso_to_slack_ts(iso_str: str) -> str:
+    """Inverse of _slack_ts_to_iso — turns our stored `last_polled` cursor back
+    into the unix-timestamp cursor Slack's `oldest` param expects."""
+    if not iso_str or iso_str == "0":
+        return "0"
+    try:
+        return str(datetime.fromisoformat(iso_str.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return iso_str  # already a raw slack ts (first poll / legacy data)
+
+
+def _slack_message_action(msg: dict, slack_id: str) -> tuple[str, bool]:
+    """
+    Maps a Slack message event to a specific action tag, and reports whether
+    it represents *this* user's action (vs. someone else's in the channel,
+    which a per-user poll should ignore).
+    """
+    subtype = msg.get("subtype")
+    if subtype == "channel_join":
+        # The person who joined isn't necessarily who invited them — the
+        # inviter is who performed the action this ritual cares about.
+        return "slack.member_invited", msg.get("inviter") == slack_id
+    if subtype:
+        return f"slack.{subtype}", msg.get("user") == slack_id
+    return "slack.message_posted", msg.get("user") == slack_id
 
 
 def poll_slack(user_id: str, config: dict, last_polled: str) -> list[dict]:
@@ -139,16 +216,78 @@ def poll_slack(user_id: str, config: dict, last_polled: str) -> list[dict]:
     from slack_sdk import WebClient
     client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
     channel = os.getenv("SLACK_CHANNEL")
-    resp = client.conversations_history(channel=channel, oldest=last_polled, limit=50)
+    resp = client.conversations_history(
+        channel=channel, oldest=_iso_to_slack_ts(last_polled), limit=50
+    )
     events = []
     for msg in resp["messages"]:
-        if msg.get("user") == config["slack_id"]:
-            events.append({
-                "user_id": user_id,
-                "source": "slack",
-                "time": str(msg["ts"]),
-                "text": msg.get("text", ""),
-            })
+        action, is_relevant = _slack_message_action(msg, config["slack_id"])
+        if not is_relevant:
+            continue
+        events.append({
+            "user_id": user_id,
+            "source": "slack",
+            "action": action,
+            "time": _slack_ts_to_iso(msg["ts"]),
+            "text": msg.get("text", ""),
+        })
+    return events
+
+
+_slack_channels_scope_warned: set[str] = set()
+
+
+def poll_slack_channels(user_id: str, config: dict, last_polled: str) -> list[dict]:
+    """
+    Detects public channels this user created since last_polled.
+    Channel *creation* never shows up in conversations.history for the
+    channel itself, so this needs a separate conversations.list pass —
+    without it, "create a Slack channel" is invisible to detection entirely.
+
+    Requires the bot token to have the `channels:read` scope. Private
+    channels aren't covered (would additionally need `groups:read`).
+    """
+    from slack_sdk import WebClient
+    client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+    cutoff = 0.0
+    if last_polled and last_polled != "0":
+        try:
+            cutoff = datetime.fromisoformat(last_polled.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            try:
+                cutoff = float(last_polled)
+            except ValueError:
+                cutoff = 0.0
+
+    try:
+        resp = client.conversations_list(types="public_channel", limit=200)
+    except Exception as e:
+        if "missing_scope" in str(e):
+            if user_id not in _slack_channels_scope_warned:
+                _slack_channels_scope_warned.add(user_id)
+                print(
+                    f"[poller] {user_id}/slack_channels: bot token is missing the "
+                    f"'channels:read' scope — add it in slack_manifest.json, reinstall "
+                    f"the Slack app, and update SLACK_BOT_TOKEN. Skipping "
+                    f"channel-creation detection until then (won't log again)."
+                )
+        else:
+            print(f"[poller] {user_id}/slack_channels error: {e}")
+        return []
+
+    events = []
+    for ch in resp.get("channels", []):
+        created = ch.get("created", 0)
+        if ch.get("creator") != config["slack_id"] or created <= cutoff:
+            continue
+        events.append({
+            "user_id": user_id,
+            "source": "slack",
+            "action": "slack.channel_created",
+            "time": _slack_ts_to_iso(created),
+            "text": f"Created channel #{ch.get('name', '')}",
+        })
     return events
 
 
@@ -159,9 +298,10 @@ def poll_user(user_id: str) -> None:
     user_state = state.get(user_id, {})
 
     sources = {
-        "calendar": (poll_calendar, "calendar_last_polled"),
-        "notion":   (poll_notion,   "notion_last_polled"),
-        "slack":    (poll_slack,    "slack_last_polled"),
+        "calendar":      (poll_calendar,         "calendar_last_polled"),
+        "notion":        (poll_notion,            "notion_last_polled"),
+        "slack":         (poll_slack,             "slack_last_polled"),
+        "slack_channels": (poll_slack_channels,   "slack_channels_last_polled"),
     }
 
     for source, (fn, state_key) in sources.items():

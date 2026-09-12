@@ -99,8 +99,18 @@ def find_matching_tool(user_id: str, message: str) -> list[dict]:
     ]
 
 
-def tool_already_saved(user_id: str, sequence: list) -> bool:
-    return any(t["sequence"] == sequence for t in get_tools(user_id))
+def tool_already_saved(user_id: str, sequence: list, threshold: float = 0.6) -> bool:
+    """
+    Fuzzy check: a saved tool whose sequence overlaps enough with the given
+    one counts as "the same tool" — kept consistent with the fuzzy matching
+    used to detect the pattern in the first place (see matching.py), so a
+    near-duplicate doesn't get re-proposed on every cycle.
+    """
+    from matching import sequence_similarity
+    return any(
+        sequence_similarity(t["sequence"], sequence) >= threshold
+        for t in get_tools(user_id)
+    )
 
 
 def slack_id_to_user_id(slack_id: str) -> str | None:
