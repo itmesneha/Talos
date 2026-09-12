@@ -1,4 +1,4 @@
-# Tool-Synthesis Agent — Hackathon MVP Planner
+# Talos — Hackathon MVP Planner
 
 ## What We're Building
 

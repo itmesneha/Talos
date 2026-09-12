@@ -1,5 +1,5 @@
 """
-LangGraph node functions for the Tool-Synthesis agent.
+LangGraph node functions for Talos.
 
 Each node receives the current AgentState and returns a dict of updated keys.
 

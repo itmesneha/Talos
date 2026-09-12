@@ -1,5 +1,5 @@
 """
-LangGraph graph wiring for Tool-Synthesis.
+LangGraph graph wiring for Talos.
 
 Imports all nodes from nodes.py, wires them into a StateGraph,
 compiles with MemorySaver, and exposes the public API used by

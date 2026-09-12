@@ -1,4 +1,4 @@
-# Tool-Synthesis Agent — Agentic Workflow
+# Talos — Agentic Workflow
 
 ## Architecture Diagram
 

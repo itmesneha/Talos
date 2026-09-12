@@ -225,7 +225,7 @@ def _prompt_calendar_setup(user_id: str, slack_user_id: str, client):
         resp = client.chat_postMessage(
             channel=dm_channel,
             text=(
-                f"Hi! I'm your Tool-Creator bot.\n\n"
+                f"Hi! I'm Talos.\n\n"
                 f"To watch your calendar activity I need access to your Google Calendar.\n"
                 f"*<{auth_url}|Click here to connect Google Calendar>*\n\n"
                 f"After you approve, I'll start learning your workflows automatically."
