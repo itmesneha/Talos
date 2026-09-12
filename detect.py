@@ -91,9 +91,15 @@ def cluster_by_time(events: list[dict], window_minutes: int = 10) -> list[list[d
     if not events:
         return []
 
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     def _parse_time(t: str) -> datetime:
+        # Slack event timestamps are Unix epoch seconds (e.g. "1789191318.221739"),
+        # calendar/notion timestamps are ISO8601 — try both.
+        try:
+            return datetime.fromtimestamp(float(t), tz=timezone.utc)
+        except (ValueError, OSError):
+            pass
         return datetime.fromisoformat(t.replace("Z", "+00:00"))
 
     # Sort by actual instant, not raw ISO string — sources mix timezone
