@@ -1,0 +1,8 @@
+[
+  {"summary": "Client onboarding - Acme Corp",   "start": {"dateTime": "2024-01-16T10:00:00Z"}},
+  {"summary": "Internal tooling review",          "start": {"dateTime": "2024-01-17T14:00:00Z"}},
+  {"summary": "Client onboarding - Globex Corp",  "start": {"dateTime": "2024-01-23T10:00:00Z"}},
+  {"summary": "Renewal negotiation - Waystar",    "start": {"dateTime": "2024-01-24T15:00:00Z"}},
+  {"summary": "Client onboarding - Initech",      "start": {"dateTime": "2024-01-30T10:00:00Z"}},
+  {"summary": "Sales pipeline review",            "start": {"dateTime": "2024-01-31T11:00:00Z"}}
+]

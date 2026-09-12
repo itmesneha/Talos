@@ -1,0 +1,8 @@
+[
+  {"summary": "Project update - Alpha launch", "start": {"dateTime": "2024-01-18T09:00:00Z"}},
+  {"summary": "Bug bash session",              "start": {"dateTime": "2024-01-19T13:00:00Z"}},
+  {"summary": "Project update - Beta launch",  "start": {"dateTime": "2024-01-25T09:00:00Z"}},
+  {"summary": "Compliance training",           "start": {"dateTime": "2024-01-26T10:00:00Z"}},
+  {"summary": "Project update - GA release",   "start": {"dateTime": "2024-02-01T09:00:00Z"}},
+  {"summary": "Post-mortem review",            "start": {"dateTime": "2024-02-02T14:00:00Z"}}
+]

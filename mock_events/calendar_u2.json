@@ -1,0 +1,8 @@
+[
+  {"summary": "Expense review with Finance",  "start": {"dateTime": "2024-01-15T14:00:00Z"}},
+  {"summary": "Product demo for stakeholders","start": {"dateTime": "2024-01-16T10:00:00Z"}},
+  {"summary": "Expense review with Ops",      "start": {"dateTime": "2024-01-22T14:00:00Z"}},
+  {"summary": "Vendor contract signing",      "start": {"dateTime": "2024-01-23T11:00:00Z"}},
+  {"summary": "Expense review with Legal",    "start": {"dateTime": "2024-01-29T14:00:00Z"}},
+  {"summary": "Team retrospective",           "start": {"dateTime": "2024-01-30T15:00:00Z"}}
+]

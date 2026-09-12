@@ -1,0 +1,8 @@
+[
+  {"summary": "Weekly check-in with Alice",   "start": {"dateTime": "2024-01-15T09:00:00Z"}},
+  {"summary": "Team lunch",                   "start": {"dateTime": "2024-01-15T12:00:00Z"}},
+  {"summary": "Weekly check-in with Bob",     "start": {"dateTime": "2024-01-22T09:00:00Z"}},
+  {"summary": "Quarterly review",             "start": {"dateTime": "2024-01-22T14:00:00Z"}},
+  {"summary": "Weekly check-in with Carol",   "start": {"dateTime": "2024-01-29T09:00:00Z"}},
+  {"summary": "All-hands company meeting",    "start": {"dateTime": "2024-01-29T16:00:00Z"}}
+]

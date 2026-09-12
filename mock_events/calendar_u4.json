@@ -1,0 +1,8 @@
+[
+  {"summary": "Q4 planning meeting",          "start": {"dateTime": "2024-01-17T11:00:00Z"}},
+  {"summary": "One-off sync with legal",      "start": {"dateTime": "2024-01-18T15:00:00Z"}},
+  {"summary": "Budget review meeting",        "start": {"dateTime": "2024-01-24T11:00:00Z"}},
+  {"summary": "New hire orientation",         "start": {"dateTime": "2024-01-25T09:00:00Z"}},
+  {"summary": "Roadmap review meeting",       "start": {"dateTime": "2024-01-31T11:00:00Z"}},
+  {"summary": "Team social event",            "start": {"dateTime": "2024-02-01T17:00:00Z"}}
+]

@@ -1,0 +1,8 @@
+[
+  {"summary": "Interview - Frontend candidate","start": {"dateTime": "2024-01-17T14:00:00Z"}},
+  {"summary": "Hiring committee debrief",      "start": {"dateTime": "2024-01-17T17:00:00Z"}},
+  {"summary": "Interview - Backend candidate", "start": {"dateTime": "2024-01-24T14:00:00Z"}},
+  {"summary": "Compensation review call",      "start": {"dateTime": "2024-01-25T10:00:00Z"}},
+  {"summary": "Interview - Data analyst",      "start": {"dateTime": "2024-01-31T14:00:00Z"}},
+  {"summary": "Team offsite planning",         "start": {"dateTime": "2024-02-01T11:00:00Z"}}
+]

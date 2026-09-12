@@ -1,0 +1,8 @@
+[
+  {"summary": "1:1 with Sarah",               "start": {"dateTime": "2024-01-16T15:00:00Z"}},
+  {"summary": "Cross-team sync",              "start": {"dateTime": "2024-01-17T10:00:00Z"}},
+  {"summary": "1:1 with Tom",                 "start": {"dateTime": "2024-01-23T15:00:00Z"}},
+  {"summary": "Annual performance calibration","start": {"dateTime": "2024-01-24T11:00:00Z"}},
+  {"summary": "1:1 with Priya",               "start": {"dateTime": "2024-01-30T15:00:00Z"}},
+  {"summary": "Hackathon kickoff",             "start": {"dateTime": "2024-01-31T09:00:00Z"}}
+]

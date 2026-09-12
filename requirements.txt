@@ -1,0 +1,20 @@
+# Slack
+slack-bolt>=1.18.0
+slack-sdk>=3.27.0
+
+# HTTP
+requests>=2.31.0
+
+# Google Calendar OAuth
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.125.0
+
+# Ollama (local LLM)
+ollama>=0.2.0
+
+# LangGraph agent
+langgraph>=0.2.0
+
+# Environment variables
+python-dotenv>=1.0.0

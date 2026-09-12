@@ -1,0 +1,8 @@
+[
+  {"summary": "Task review with Engineering", "start": {"dateTime": "2024-01-16T10:00:00Z"}},
+  {"summary": "Design critique session",      "start": {"dateTime": "2024-01-17T14:00:00Z"}},
+  {"summary": "Task review with Design",      "start": {"dateTime": "2024-01-23T10:00:00Z"}},
+  {"summary": "Offsite planning call",        "start": {"dateTime": "2024-01-24T13:00:00Z"}},
+  {"summary": "Task review with Marketing",   "start": {"dateTime": "2024-01-30T10:00:00Z"}},
+  {"summary": "HR onboarding session",        "start": {"dateTime": "2024-01-31T09:00:00Z"}}
+]

@@ -1,0 +1,39 @@
+{
+  "u11": [
+    {
+      "is_routine": true,
+      "sequence": [
+        "calendar",
+        "notion",
+        "slack"
+      ],
+      "args": [
+        {
+          "name": "person",
+          "description": "The person the user is synchronizing with.",
+          "example": "Ananya"
+        },
+        {
+          "name": "topic",
+          "description": "The topic of discussion.",
+          "example": "agenda"
+        },
+        {
+          "name": "time",
+          "description": "The time for synchronization.",
+          "example": "10am"
+        }
+      ],
+      "description": "Syncs with a person each week, takes prep notes, and discusses agenda.",
+      "tool_name": "weekly_sync",
+      "steps": [
+        "Sync calendar with {{person}}",
+        "Create prep notes in Notion for {{person}}",
+        "Discuss {{topic}} on Slack with {{person}}"
+      ],
+      "example": "/weekly_sync person=Ananya topic=agenda",
+      "confirmed": true,
+      "executor_code": "def execute(args: dict) -> str:\n    calendar_result = check_calendar(args[\"person\"])\n    \n    title = args.get(\"topic\") or args.get(\"person\", \"Note\")\n    notes = draft_message(args[\"person\"], calendar_result, check_notion(args[\"person\"]))\n    notion_page_id = add_notion_page(title, notes)\n    \n    time_str = args.get(\"time\", \"10am\")\n    text = f\"Meeting with {args['person']} about {title} at {time_str}\"\n    slack_message_sent = post_slack(text)\n\n    return f\"Synced with {args['person']}, created Notion page and posted Slack message\""
+    }
+  ]
+}
