@@ -175,6 +175,38 @@ def handle_message(message, say, client):
             say("Sent you a demo proposal — check your DMs!")
         return
 
+    # Manual demo trigger — reliably creates a real Slack channel and invites
+    # the caller. No LLM, no detection, no external dependency beyond Slack
+    # itself — built specifically to always work live during a demo.
+    if text == "!demo channel":
+        import re as _re
+        import time as _time
+        from tools import slack_create_channel, slack_invite
+
+        channel_name = f"talos-demo-{int(_time.time())}"
+        try:
+            create_result = slack_create_channel(channel_name)
+            match = _re.search(r"\(ID: (\w+)\)", create_result)
+            if not match:
+                say(f"❌ Couldn't create the demo channel: {create_result}")
+                return
+            new_channel_id = match.group(1)
+
+            invite_result = slack_invite(new_channel_id, [slack_user_id])
+            client.chat_postMessage(
+                channel=new_channel_id,
+                text="👋 This channel was created automatically by Talos's `!demo channel` trigger.",
+            )
+            say(
+                f"✅ Demo tool ran successfully!\n"
+                f"• {create_result}\n"
+                f"• {invite_result}\n"
+                f"<#{new_channel_id}> is ready — check it out!"
+            )
+        except Exception as e:
+            say(f"❌ Demo tool failed: {e}")
+        return
+
     # Pending proposal? Route reply through LangGraph resume
     from agent_graph import resume_for_user
     if resume_for_user(slack_user_id, text, say):
